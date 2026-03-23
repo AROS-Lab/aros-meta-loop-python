@@ -94,8 +94,7 @@ class HarnessTrigger:
     def _resume_harness(self) -> dict:
         """Resume an existing unfinished harness-loop."""
         resume_prompt = (
-            "Resume the harness-loop. This is an autonomous MetaLoop dispatch - NOT a human request. "
-            "The plan was already confirmed. Do NOT output [HARNESS_EXEC_READY] or wait for /confirm. "
+            "Resume the harness-loop. The plan was already confirmed in a previous session. "
             "Enter the Execute Loop now. Pick up the next batch of ready tasks and execute them."
         )
         try:
@@ -190,8 +189,10 @@ class HarnessTrigger:
     def _format_prompt(self, tasks: list[PlannedTask]) -> str:
         """Format tasks into a harness-loop prompt with Nirmana persona.
 
-        IMPORTANT: This prompt is dispatched by MetaLoop autonomously (no human in the loop).
-        It must tell Claude to skip the Phase 1 confirmation gate and go directly to execution.
+        The prompt tells Claude to go through Phase 1 (requirements/design) normally,
+        but self-confirm as Eddie-Nirmana instead of waiting for human input.
+        After confirmation, output [HARNESS_EXEC_READY] as normal — Eddie-Nirmana
+        will handle the /confirm command automatically.
         """
         task_descriptions = []
         for i, t in enumerate(tasks, 1):
@@ -205,15 +206,14 @@ class HarnessTrigger:
         return (
             f"You are Eddie-Nirmana executing an autonomous improvement cycle triggered by MetaLoop. "
             f"Read ~/eddie-nirmana/PERSONA.md for your identity.\n\n"
-            f"IMPORTANT: This is an autonomous MetaLoop dispatch - NOT a human request. "
-            f"Skip Phase 1 (requirements gathering/confirmation). The plan is already confirmed by MetaLoop. "
-            f"Do NOT output [HARNESS_EXEC_READY] or wait for /confirm. "
-            f"Go directly to task decomposition and execution.\n\n"
             f"The MetaLoop identified the following improvement tasks (all GREEN authority - auto-execute):\n\n"
             f"{tasks_text}\n\n"
-            f"Execute these tasks:\n"
-            f"1. Initialize .harness/ with these tasks as the DAG\n"
-            f"2. Enter the Execute Loop immediately\n"
-            f"3. Commit and push results when done\n"
-            f"4. Output [HARNESS_COMPLETE] when finished"
+            f"Follow the normal harness-loop Phase 1 process:\n"
+            f"1. Analyze the tasks and clarify requirements (as Nirmana, you confirm them yourself)\n"
+            f"2. Design the implementation approach\n"
+            f"3. Decompose into a task DAG\n"
+            f"4. Present the final plan summary\n"
+            f"5. Output [HARNESS_EXEC_READY] at the end\n\n"
+            f"Since Eddie is /away, you ARE the reviewer. Confirm the plan as Nirmana, "
+            f"then output [HARNESS_EXEC_READY]. Eddie-Nirmana will handle /confirm automatically."
         )
