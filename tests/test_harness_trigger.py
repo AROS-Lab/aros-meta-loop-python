@@ -46,6 +46,11 @@ class TestTriggerHarnessLoop:
         assert result["status"] == "dispatched"
         assert result["task_count"] == 1
         mock_client.post.assert_called_once()
+        # Verify bot_token is included in the payload
+        call_kwargs = mock_client.post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert "bot_token" in payload
+        assert payload["bot_token"] == ""
 
     def test_trigger_skips_when_running(self, trigger):
         """Mock is_harness_running returning True, verify skipped."""

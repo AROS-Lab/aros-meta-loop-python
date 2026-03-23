@@ -60,6 +60,7 @@ class HarnessTrigger:
                         "chat_id": self.chat_id,
                         "message": prompt,
                         "bot_id": "mini_claude_bot",
+                        "bot_token": "",  # Internal call - no TG notifications needed
                     },
                 )
                 if resp.status_code == 200:
