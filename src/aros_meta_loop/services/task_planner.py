@@ -131,50 +131,75 @@ class TaskPlanner:
         return ""
 
     def _parse_backlog_items(self, backlog: str) -> list[dict]:
-        """Parse night-runner-projects.md for actionable backlog items."""
+        """Parse night-runner-projects.md for actionable backlog items.
+
+        Supports both bullet lists (- item) and markdown tables (| # | Task | Source | Priority |).
+        """
         items = []
         in_backlog = False
-        current_project = "~/Projects/aros-kernel"
 
         for line in backlog.split("\n"):
-            # Detect section headers
             if "Task Backlog" in line or "Backlog" in line:
                 in_backlog = True
                 continue
             if in_backlog and line.startswith("## "):
                 break
+            if not in_backlog:
+                continue
 
-            # Detect project context from nearby headers
-            if "aros-kernel" in line.lower():
-                current_project = "~/Projects/aros-kernel"
-            elif "mini-claude-bot" in line.lower():
-                current_project = "~/Projects/mini-claude-bot"
-            elif "telegram" in line.lower():
-                current_project = "~/Projects/telegram-claude-hero"
-            elif "centurion" in line.lower():
-                current_project = "~/Projects/centurion"
-            elif "meta-loop" in line.lower() or "metaloop" in line.lower():
-                current_project = "~/Projects/aros-meta-loop"
+            # Skip table header/separator rows
+            if line.startswith("| #") or line.startswith("|---"):
+                continue
 
-            if in_backlog and (line.startswith("- ") or re.match(r"^\d+\.", line)):
+            text = ""
+            priority = "MEDIUM"
+
+            # Parse markdown table: | N | Task | Source | Priority |
+            if line.startswith("|") and line.count("|") >= 4:
+                cells = [c.strip() for c in line.split("|")]
+                cells = [c for c in cells if c]
+                if len(cells) >= 2 and not cells[0].startswith("#"):
+                    text = cells[1].strip()
+                    if len(cells) >= 4:
+                        priority = cells[3].strip().upper()
+
+            # Parse bullet list: - item or 1. item
+            elif line.startswith("- ") or re.match(r"^\d+\.", line):
                 text = re.sub(r"^[-\d.]+\s*", "", line).strip()
-                # Strip markdown bold/links
-                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-                text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-                if text and len(text) > 10:
-                    # Classify authority based on keywords
-                    is_new = any(kw in text.lower() for kw in [
-                        "new feature", "add ", "create ", "implement ", "build ",
-                        "design ", "architect",
-                    ])
-                    items.append({
-                        "title": text[:80],
-                        "description": text,
-                        "project": current_project,
-                        "is_new_feature": is_new,
-                        "est_minutes": 20,
-                        "source": "backlog",
-                    })
+
+            # Clean up
+            text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+            text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+            if not text or len(text) < 10 or "DONE" in priority:
+                continue
+
+            # Detect project from task text
+            project = "~/Projects/aros-kernel"
+            tl = text.lower()
+            if "mini-claude-bot" in tl or "gateway" in tl:
+                project = "~/Projects/mini-claude-bot"
+            elif "centurion" in tl:
+                project = "~/Projects/centurion"
+            elif "telegram" in tl:
+                project = "~/Projects/telegram-claude-hero"
+            elif "meta-loop" in tl or "metaloop" in tl:
+                project = "~/Projects/aros-meta-loop"
+            elif "nirmana" in tl or "/away" in tl or "/back" in tl:
+                project = "~/Projects/mini-claude-bot"
+
+            is_new = any(kw in tl for kw in [
+                "new feature", "add ", "create ", "implement ", "build ", "design ",
+            ])
+            items.append({
+                "title": text[:80],
+                "description": text,
+                "project": project,
+                "is_new_feature": is_new,
+                "priority": priority,
+                "est_minutes": 20,
+                "source": "backlog",
+            })
         return items
 
     # ── Source 2: GitHub Issues ─────────────────────────────────────
