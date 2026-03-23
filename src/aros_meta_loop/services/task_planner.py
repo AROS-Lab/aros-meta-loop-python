@@ -55,6 +55,10 @@ class PlannedTask:
 class TaskPlanner:
     """Generates improvement tasks from meta-goal analysis, GitHub issues, and chat history."""
 
+    # Track recently dispatched task titles to avoid duplicates across cycles
+    _recent_titles: list[str] = []
+    _MAX_RECENT = 20
+
     def __init__(self, backlog_path: Path = NIGHT_RUNNER_PROJECTS):
         self.backlog_path = backlog_path
         self._backlog_cache: str | None = None
@@ -75,7 +79,16 @@ class TaskPlanner:
             if len(tasks) >= MAX_TASKS_PER_CYCLE:
                 break
             new_tasks = self._tasks_for_goal(goal, scores)
-            tasks.extend(new_tasks)
+            # Deduplicate: skip tasks with titles we recently generated
+            for t in new_tasks:
+                if t.title not in TaskPlanner._recent_titles:
+                    tasks.append(t)
+
+        # Record titles to prevent duplicates in next cycle
+        for t in tasks:
+            TaskPlanner._recent_titles.append(t.title)
+        # Keep only the last N titles
+        TaskPlanner._recent_titles = TaskPlanner._recent_titles[-TaskPlanner._MAX_RECENT:]
 
         return tasks[:MAX_TASKS_PER_CYCLE]
 
@@ -188,9 +201,10 @@ class TaskPlanner:
         tasks = []
         for issue in issues[:3]:  # Max 3 from issues
             labels = [l.get("name", "") for l in issue.get("labels", [])]
-            # Classify authority
-            is_bug = any(l in ("bug", "fix", "patch") for l in labels)
-            authority = AuthorityLevel.GREEN if is_bug else AuthorityLevel.YELLOW
+            # Default GREEN — bug fixes and improvements are routine ops
+            # Only explicitly feature/architecture labels get YELLOW
+            is_feature = any(l in ("feature", "enhancement", "architecture", "design") for l in labels)
+            authority = AuthorityLevel.YELLOW if is_feature else AuthorityLevel.GREEN
 
             tasks.append(PlannedTask(
                 title=f"[{issue['repo'].split('/')[-1]}#{issue['number']}] {issue['title'][:60]}",
@@ -265,28 +279,26 @@ class TaskPlanner:
 
     def _efficiency_tasks(self) -> list[PlannedTask]:
         """G2 low: find efficiency improvements from issues or backlog."""
-        # Try GitHub issues with performance/optimization labels first
+        # Try GitHub issues — any open issue is work that improves efficiency
         issues = self._fetch_github_issues()
-        perf_issues = [i for i in issues if any(
-            l.get("name", "") in ("performance", "optimization", "efficiency")
-            for l in i.get("labels", [])
-        )]
-        if perf_issues:
-            return self._issues_to_tasks(perf_issues, "G2_efficient")
+        if issues:
+            # Prefer perf-labeled, but fall through to any issue
+            perf_issues = [i for i in issues if any(
+                l.get("name", "") in ("performance", "optimization", "efficiency")
+                for l in i.get("labels", [])
+            )]
+            target = perf_issues if perf_issues else issues
+            return self._issues_to_tasks(target[:2], "G2_efficient")
 
         # Fallback to backlog
         backlog = self._read_backlog()
         if backlog:
             items = self._parse_backlog_items(backlog)
-            opt_items = [i for i in items if any(
-                kw in i["description"].lower()
-                for kw in ["optimize", "performance", "efficient", "speed", "fast"]
-            )]
-            if opt_items:
+            if items:
                 return [PlannedTask(
-                    title=opt_items[0]["title"],
-                    description=opt_items[0]["description"],
-                    target_project=opt_items[0]["project"],
+                    title=items[0]["title"],
+                    description=items[0]["description"],
+                    target_project=items[0]["project"],
                     authority_level=AuthorityLevel.GREEN,
                     estimated_minutes=20,
                     goal_source="G2_efficient",
@@ -295,8 +307,8 @@ class TaskPlanner:
 
         # Final fallback
         return [PlannedTask(
-            title="Optimize aros-kernel build times",
-            description="Profile cargo build, identify slow compilation units, optimize Cargo.toml features and dependencies",
+            title="Run and fix linting issues across all AROS projects",
+            description="Run cargo clippy on aros-kernel, pytest on aros-meta-loop, go vet on telegram-claude-hero. Fix any warnings.",
             target_project="~/Projects/aros-kernel",
             authority_level=AuthorityLevel.GREEN,
             estimated_minutes=20,

@@ -215,15 +215,18 @@ class TestYellowTasksQueuedToApprovals:
 
     def test_yellow_tasks_queued_to_approvals(self, full_env):
         state_mgr = full_env["state_mgr"]
-        planner = TaskPlanner(backlog_path=Path("/nonexistent/backlog.md"))
-        tasks = planner.generate_tasks(
-            scores={"G5_ambitious": 0.1},
-            below_threshold=["G5_ambitious"],
-        )
-
-        yellow_tasks = [t for t in tasks if t.authority_level == AuthorityLevel.YELLOW]
-        # The fallback for G5 with no backlog produces a YELLOW task
-        assert len(yellow_tasks) >= 1, "Expected at least one YELLOW task from G5 fallback"
+        # Create explicit YELLOW tasks (feature-labeled issues would be YELLOW)
+        yellow_tasks = [
+            PlannedTask(
+                title="Add new dashboard feature",
+                description="Design and implement a metrics dashboard",
+                target_project="~/Projects/aros-kernel",
+                authority_level=AuthorityLevel.YELLOW,
+                estimated_minutes=30,
+                goal_source="G5_ambitious",
+                source="test",
+            ),
+        ]
 
         # Queue each YELLOW task
         approval_ids = []

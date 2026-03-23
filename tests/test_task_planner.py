@@ -11,6 +11,12 @@ from aros_meta_loop.services.task_planner import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_recent_titles():
+    """Clear deduplication cache between tests."""
+    TaskPlanner._recent_titles = []
+
+
 @pytest.fixture
 def planner_no_backlog(tmp_path):
     """TaskPlanner with a non-existent backlog path and no external sources."""
