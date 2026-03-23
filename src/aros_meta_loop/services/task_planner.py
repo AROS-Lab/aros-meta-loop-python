@@ -55,9 +55,9 @@ class PlannedTask:
 class TaskPlanner:
     """Generates improvement tasks from meta-goal analysis, GitHub issues, and chat history."""
 
-    # Track recently dispatched task titles to avoid duplicates across cycles
-    _recent_titles: list[str] = []
-    _MAX_RECENT = 20
+    # Track recently dispatched tasks with timestamps for time-based expiry
+    _recent_dispatches: list[tuple[str, float]] = []  # (title, timestamp)
+    _DEDUP_WINDOW_SECONDS = 3600  # 1 hour - after this, same task can be re-generated
 
     def __init__(self, backlog_path: Path = NIGHT_RUNNER_PROJECTS):
         self.backlog_path = backlog_path
@@ -73,22 +73,30 @@ class TaskPlanner:
         if not below_threshold:
             return []
 
+        # Expire old dedup entries
+        import time
+        now = time.time()
+        TaskPlanner._recent_dispatches = [
+            (title, ts) for title, ts in TaskPlanner._recent_dispatches
+            if now - ts < TaskPlanner._DEDUP_WINDOW_SECONDS
+        ]
+        recent_titles = {title for title, _ in TaskPlanner._recent_dispatches}
+
         tasks: list[PlannedTask] = []
 
         for goal in below_threshold:
             if len(tasks) >= MAX_TASKS_PER_CYCLE:
                 break
             new_tasks = self._tasks_for_goal(goal, scores)
-            # Deduplicate: skip tasks with titles we recently generated
+            # Deduplicate: skip tasks dispatched within the last hour
             for t in new_tasks:
-                if t.title not in TaskPlanner._recent_titles:
+                if t.title not in recent_titles:
                     tasks.append(t)
+                    recent_titles.add(t.title)
 
-        # Record titles to prevent duplicates in next cycle
+        # Record dispatched titles with timestamp
         for t in tasks:
-            TaskPlanner._recent_titles.append(t.title)
-        # Keep only the last N titles
-        TaskPlanner._recent_titles = TaskPlanner._recent_titles[-TaskPlanner._MAX_RECENT:]
+            TaskPlanner._recent_dispatches.append((t.title, now))
 
         return tasks[:MAX_TASKS_PER_CYCLE]
 

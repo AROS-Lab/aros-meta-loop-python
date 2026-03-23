@@ -14,7 +14,7 @@ from aros_meta_loop.services.task_planner import (
 @pytest.fixture(autouse=True)
 def reset_recent_titles():
     """Clear deduplication cache between tests."""
-    TaskPlanner._recent_titles = []
+    TaskPlanner._recent_dispatches = []
 
 
 @pytest.fixture
