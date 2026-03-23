@@ -32,6 +32,10 @@ def start_scheduler(engine) -> None:
     else:
         interval_seconds = interval_hours * 3600
 
+    # In aggressive mode (/away), fire immediately then every 30min
+    # In balanced mode (normal), wait the full interval before first cycle
+    fire_immediately = mode == "aggressive"
+
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
         _trigger_cycle,
@@ -39,10 +43,10 @@ def start_scheduler(engine) -> None:
         id="meta_loop_cycle",
         name="Meta Loop Cycle",
         replace_existing=True,
-        next_run_time=datetime.now(timezone.utc),  # Fire immediately on startup
+        next_run_time=datetime.now(timezone.utc) if fire_immediately else None,
     )
     _scheduler.start()
-    logger.info(f"Scheduler started: mode={mode}, interval={interval_seconds}s (first cycle fires immediately)")
+    logger.info(f"Scheduler started: mode={mode}, interval={interval_seconds}s, fire_now={fire_immediately}")
 
 
 def update_schedule(mode: str) -> None:
@@ -69,11 +73,21 @@ def update_schedule(mode: str) -> None:
         interval_hours = cron_config.get("normal_interval_hours", 4)
         interval_seconds = interval_hours * 3600
 
+    # When switching to aggressive (/away), fire immediately then repeat
+    fire_immediately = mode == "aggressive"
+
     _scheduler.reschedule_job(
         "meta_loop_cycle",
         trigger=IntervalTrigger(seconds=interval_seconds),
     )
-    logger.info(f"Scheduler updated: mode={mode}, interval={interval_seconds}s")
+
+    if fire_immediately:
+        _scheduler.modify_job(
+            "meta_loop_cycle",
+            next_run_time=datetime.now(timezone.utc),
+        )
+
+    logger.info(f"Scheduler updated: mode={mode}, interval={interval_seconds}s, fire_now={fire_immediately}")
 
 
 def stop_scheduler() -> None:
