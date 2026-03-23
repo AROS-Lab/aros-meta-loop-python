@@ -157,7 +157,9 @@ class TestYellowTasksQueuedNotDispatched:
             with patch("aros_meta_loop.services.engine.get_db"), \
                  patch("aros_meta_loop.services.engine.L1Collector"), \
                  patch("aros_meta_loop.services.engine.L2Evaluator"), \
-                 patch("aros_meta_loop.services.engine.L3SignalDeriver"):
+                 patch("aros_meta_loop.services.engine.L3SignalDeriver"), \
+                 patch("aros_meta_loop.services.harness_trigger.HarnessTrigger.verify_last_dispatch",
+                       return_value={"status": "idle", "completed": False, "details": "No active task"}):
                 engine = MetaLoopEngine.__new__(MetaLoopEngine)
                 engine.state = state_mgr
                 engine._cycle_log = {"cycle_num": 10}

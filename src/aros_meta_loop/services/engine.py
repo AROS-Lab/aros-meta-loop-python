@@ -690,6 +690,18 @@ class MetaLoopEngine:
         if mode == "frozen":
             return []
 
+        # Verify previous dispatch before generating new tasks
+        from aros_meta_loop.services.harness_trigger import HarnessTrigger
+        trigger = HarnessTrigger()
+        verification = trigger.verify_last_dispatch()
+        if verification.get("status") == "running":
+            logger.info(
+                f"Previous dispatch still running "
+                f"({verification.get('elapsed_seconds', 0):.0f}s), "
+                f"skipping new task generation"
+            )
+            return []
+
         scores = perceive_data.get("l2_scores", {})
         below = scores.get("below_threshold", [])
 
@@ -753,6 +765,7 @@ class MetaLoopEngine:
                 "green_dispatched": n_green,
                 "yellow_queued": n_yellow,
                 "skipped": n_skipped,
+                "verification": verification,
             },
         )
 

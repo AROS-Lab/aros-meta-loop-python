@@ -1,4 +1,6 @@
 """Tests for TaskPlanner — covers all three sources: backlog, GitHub issues, chat history."""
+import json
+import subprocess
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -199,3 +201,90 @@ def test_chat_history_search(planner_no_backlog):
     chat_tasks = [t for t in tasks if t.source == "chat_history"]
     assert len(chat_tasks) >= 1
     assert "GPU" in chat_tasks[0].title
+
+
+# ── Smart dedup: GitHub issue state checks ─────────────────────
+
+class TestIsIssueStillOpen:
+    """Tests for _is_issue_still_open helper method."""
+
+    def test_open_issue_returns_true(self, planner_no_backlog):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"state": "OPEN"})
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            assert planner_no_backlog._is_issue_still_open("AROS-Lab/aros-kernel#42") is True
+            mock_run.assert_called_once_with(
+                ["gh", "issue", "view", "42", "-R", "AROS-Lab/aros-kernel", "--json", "state"],
+                capture_output=True, text=True, timeout=5,
+            )
+
+    def test_closed_issue_returns_false(self, planner_no_backlog):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"state": "CLOSED"})
+        with patch("subprocess.run", return_value=mock_result):
+            assert planner_no_backlog._is_issue_still_open("AROS-Lab/aros-kernel#42") is False
+
+    def test_unparseable_backlog_item_assumes_open(self, planner_no_backlog):
+        assert planner_no_backlog._is_issue_still_open("no-hash-here") is True
+
+    def test_gh_command_failure_assumes_open(self, planner_no_backlog):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result):
+            assert planner_no_backlog._is_issue_still_open("AROS-Lab/aros-kernel#42") is True
+
+    def test_timeout_assumes_open(self, planner_no_backlog):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 5)):
+            assert planner_no_backlog._is_issue_still_open("AROS-Lab/aros-kernel#42") is True
+
+
+class TestSmartDedup:
+    """Tests for source-aware dedup in generate_tasks."""
+
+    def test_open_github_issue_not_deduped(self, planner_with_issues):
+        """Open GitHub issues should be re-dispatched even if recently seen."""
+        with patch.object(TaskPlanner, "_is_issue_still_open", return_value=True):
+            tasks1 = planner_with_issues.generate_tasks(
+                scores={"G3_reliable": 0.2},
+                below_threshold=["G3_reliable"],
+            )
+            issue_tasks1 = [t for t in tasks1 if t.source == "github_issue"]
+            assert len(issue_tasks1) >= 1
+
+            # Second call — open issues should still come through
+            tasks2 = planner_with_issues.generate_tasks(
+                scores={"G3_reliable": 0.2},
+                below_threshold=["G3_reliable"],
+            )
+            issue_tasks2 = [t for t in tasks2 if t.source == "github_issue"]
+            assert len(issue_tasks2) >= 1
+
+    def test_closed_github_issue_filtered_out(self, planner_with_issues):
+        """Closed GitHub issues should be filtered out."""
+        with patch.object(TaskPlanner, "_is_issue_still_open", return_value=False):
+            tasks = planner_with_issues.generate_tasks(
+                scores={"G3_reliable": 0.2},
+                below_threshold=["G3_reliable"],
+            )
+            issue_tasks = [t for t in tasks if t.source == "github_issue"]
+            assert len(issue_tasks) == 0
+
+    def test_non_github_tasks_still_time_deduped(self, planner_no_backlog):
+        """Non-GitHub tasks should still use time-based dedup."""
+        # First call generates fallback tasks
+        tasks1 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks1) >= 1
+        assert tasks1[0].source == "fallback"
+
+        # Second call — same fallback should be deduped
+        tasks2 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks2) == 0

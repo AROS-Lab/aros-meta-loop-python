@@ -88,9 +88,16 @@ class TaskPlanner:
             if len(tasks) >= MAX_TASKS_PER_CYCLE:
                 break
             new_tasks = self._tasks_for_goal(goal, scores)
-            # Deduplicate: skip tasks dispatched within the last hour
+            # Deduplicate with source-aware logic
             for t in new_tasks:
-                if t.title not in recent_titles:
+                if t.source == "github_issue" and t.backlog_item:
+                    # For GitHub issues: check if still open instead of time-based dedup
+                    if self._is_issue_still_open(t.backlog_item):
+                        tasks.append(t)
+                        recent_titles.add(t.title)
+                    # If closed, skip silently
+                elif t.title not in recent_titles:
+                    # For non-GitHub tasks: time-based dedup
                     tasks.append(t)
                     recent_titles.add(t.title)
 
@@ -99,6 +106,24 @@ class TaskPlanner:
             TaskPlanner._recent_dispatches.append((t.title, now))
 
         return tasks[:MAX_TASKS_PER_CYCLE]
+
+    def _is_issue_still_open(self, backlog_item: str) -> bool:
+        """Check if a GitHub issue is still open. backlog_item format: 'owner/repo#number'"""
+        try:
+            parts = backlog_item.split("#")
+            if len(parts) != 2:
+                return True  # Can't parse, assume open
+            repo, number = parts[0], parts[1]
+            result = subprocess.run(
+                ["gh", "issue", "view", number, "-R", repo, "--json", "state"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                state = json.loads(result.stdout).get("state", "OPEN")
+                return state == "OPEN"
+        except Exception:
+            pass
+        return True  # On error, assume open
 
     def _tasks_for_goal(self, goal: str, scores: dict) -> list[PlannedTask]:
         """Generate tasks for a specific low-scoring goal."""

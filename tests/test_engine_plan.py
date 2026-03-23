@@ -116,7 +116,9 @@ class TestPlanStepGeneratesInAggressiveMode:
             },
         }
 
-        with patch("aros_meta_loop.services.engine.TaskPlanner") as MockPlanner:
+        with patch("aros_meta_loop.services.engine.TaskPlanner") as MockPlanner, \
+             patch("aros_meta_loop.services.harness_trigger.HarnessTrigger.verify_last_dispatch",
+                   return_value={"status": "idle", "completed": False, "details": "No active task"}):
             MockPlanner.return_value.generate_tasks.return_value = MOCK_TASKS
             result = engine._plan_tasks(perceive_data)
 

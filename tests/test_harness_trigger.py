@@ -92,6 +92,7 @@ class TestTriggerHarnessLoop:
         assert "PERSONA.md" in prompt
         assert "Optimize build" in prompt
         assert "GREEN" in prompt
+        assert "gh issue close" in prompt
 
     def test_trigger_handles_gateway_error(self, trigger):
         """Mock httpx raising exception, verify error result."""
@@ -260,3 +261,124 @@ class TestResumeAndCleanup:
         assert trigger._is_resumable({"harness": {"current_phase": "engineering", "total": 4, "done": 2, "pending": 0, "in_progress": 1}}) is True
         # Empty -> not resumable
         assert trigger._is_resumable({"harness": {"current_phase": "init", "total": 0, "done": 0, "pending": 0, "in_progress": 0}}) is False
+
+
+class TestVerifyLastDispatch:
+    def test_verify_completed_dispatch(self, trigger):
+        """Completed dispatch returns completed=True with details and has_commits detection."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "completed",
+            "elapsed_seconds": 120,
+            "result": "Fixed the bug and pushed commit abc123",
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "completed"
+        assert result["completed"] is True
+        assert result["has_commits"] is True
+        assert "commit" in result["details"].lower()
+
+    def test_verify_completed_no_commits(self, trigger):
+        """Completed dispatch without commit keywords sets has_commits=False."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "completed",
+            "elapsed_seconds": 60,
+            "result": "Analysis complete, no changes needed",
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "completed"
+        assert result["completed"] is True
+        assert result["has_commits"] is False
+
+    def test_verify_running_dispatch(self, trigger):
+        """Running dispatch returns completed=False with elapsed time in details."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "running",
+            "elapsed_seconds": 45,
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "running"
+        assert result["completed"] is False
+        assert "45" in result["details"]
+
+    def test_verify_idle(self, trigger):
+        """Idle status returns completed=False with 'No active task' details."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "idle",
+            "elapsed_seconds": 0,
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "idle"
+        assert result["completed"] is False
+        assert result["details"] == "No active task"
+
+    def test_verify_api_error(self, trigger):
+        """Non-200 API response returns unknown status."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "unknown"
+        assert result["completed"] is False
+        assert "API error" in result["details"]
+
+    def test_verify_connection_error(self, trigger):
+        """Connection error returns error status with exception details."""
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client") as mock_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get.side_effect = httpx.ConnectError("Connection refused")
+            mock_cls.return_value = mock_client
+
+            result = trigger.verify_last_dispatch()
+
+        assert result["status"] == "error"
+        assert result["completed"] is False
+        assert "Connection refused" in result["details"]

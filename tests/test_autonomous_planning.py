@@ -137,16 +137,21 @@ class TestFullCycleGeneratesTasksInAggressiveMode:
         with patch("aros_meta_loop.services.engine.TaskPlanner") as MockPlanner:
             MockPlanner.return_value.generate_tasks.return_value = MOCK_MIXED_TASKS
 
-            # Mock L2 evaluator to report G5 below threshold
+            # Mock verify_last_dispatch to avoid hitting live gateway
             with patch.object(
-                engine.evaluator, "evaluate",
-                return_value={
-                    "G1_truthful": 0.9,
-                    "G5_ambitious": 0.1,
-                    "below_threshold": ["G5_ambitious"],
-                },
+                HarnessTrigger, "verify_last_dispatch",
+                return_value={"status": "idle", "completed": False, "details": "No active task"},
             ):
-                result = await engine.run_cycle("scheduled")
+                # Mock L2 evaluator to report G5 below threshold
+                with patch.object(
+                    engine.evaluator, "evaluate",
+                    return_value={
+                        "G1_truthful": 0.9,
+                        "G5_ambitious": 0.1,
+                        "below_threshold": ["G5_ambitious"],
+                    },
+                ):
+                    result = await engine.run_cycle("scheduled")
 
         assert result["status"] == "completed"
         assert result.get("steps_completed", 0) >= 7

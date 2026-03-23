@@ -118,6 +118,49 @@ class HarnessTrigger:
             logger.error(f"Resume failed: {e}")
             return {"status": "error", "reason": str(e)}
 
+    def verify_last_dispatch(self) -> dict:
+        """Check if the last dispatched background task completed and produced results.
+
+        Non-blocking: just checks current status, doesn't wait.
+        Returns: {status, completed, has_commits, details}
+        """
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(
+                    f"{self.gateway_url}/api/gateway/background-status/{self.chat_id}",
+                    params={"bot_id": "mini_claude_bot"},
+                )
+                if resp.status_code != 200:
+                    return {"status": "unknown", "completed": False, "details": "API error"}
+
+                bg_status = resp.json()
+                status = bg_status.get("status", "unknown")
+
+                result = {
+                    "status": status,
+                    "completed": status == "completed",
+                    "elapsed_seconds": bg_status.get("elapsed_seconds", 0),
+                    "details": "",
+                }
+
+                if status == "completed":
+                    bg_result = bg_status.get("result", "")
+                    result["details"] = str(bg_result)[:200] if bg_result else "No output"
+                    result["has_commits"] = any(
+                        kw in str(bg_result).lower()
+                        for kw in ["commit", "push", "fixed", "merged", "close"]
+                    )
+                elif status == "running":
+                    result["details"] = f"Still running ({bg_status.get('elapsed_seconds', 0):.0f}s)"
+                elif status == "idle":
+                    result["details"] = "No active task"
+                else:
+                    result["details"] = f"Status: {status}"
+
+                return result
+        except Exception as e:
+            return {"status": "error", "completed": False, "details": str(e)}
+
     def trigger_harness_loop(self, tasks: list[PlannedTask]) -> dict:
         """Trigger a harness-loop with the given tasks.
 
@@ -208,6 +251,15 @@ class HarnessTrigger:
             f"The MetaLoop identified the following improvement tasks "
             f"(all GREEN authority - auto-execute):\n\n"
             f"{tasks_text}\n\n"
+            f"## GitHub Issue Handling\n"
+            f"For any task that references a GitHub issue (format: [repo#N]):\n"
+            f"1. Read the issue details: `gh issue view N -R repo`\n"
+            f"2. Fix the issue in the target project\n"
+            f"3. Commit with message referencing the issue: `fix: description (fixes repo#N)`\n"
+            f"4. Push the changes\n"
+            f"5. Close the issue: `gh issue close N -R repo -c \"Fixed in commit <hash>\"`\n\n"
+            f"Do NOT leave issues open after fixing them. The MetaLoop will re-dispatch\n"
+            f"open issues, so closing them is how you signal completion.\n\n"
             f"## Step 1: Nirmana Review (REQUIRED)\n"
             f"Before executing, spawn an Eddie-Nirmana subagent to review this plan.\n"
             f"The subagent should:\n"
