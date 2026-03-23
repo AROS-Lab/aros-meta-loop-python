@@ -24,16 +24,16 @@ def start_scheduler(engine) -> None:
         logger.info("Cadence mode is frozen — scheduler not started")
         return
 
-    interval_hours = cron_config.get("normal_interval_hours", 1)
+    interval_hours = cron_config.get("normal_interval_hours", 4)
 
     if mode == "aggressive":
-        interval_minutes = cron_config.get("away_interval_minutes", 5)
+        interval_minutes = cron_config.get("away_interval_minutes", 15)
         interval_seconds = interval_minutes * 60
     else:
         interval_seconds = interval_hours * 3600
 
-    # In aggressive mode (/away), fire immediately then every 5min
-    # In balanced mode (normal), wait 1 hour before first cycle
+    # In aggressive mode (/away), fire immediately then every 15min
+    # In balanced mode (normal), wait 4 hours before first cycle
     fire_immediately = mode == "aggressive"
 
     _scheduler = BackgroundScheduler()
@@ -64,13 +64,13 @@ def update_schedule(mode: str) -> None:
         return
 
     if mode == "aggressive":
-        interval_minutes = cron_config.get("away_interval_minutes", 5)
+        interval_minutes = cron_config.get("away_interval_minutes", 15)
         interval_seconds = interval_minutes * 60
     elif mode == "conservative":
-        interval_hours = cron_config.get("normal_interval_hours", 1) * 2
+        interval_hours = cron_config.get("normal_interval_hours", 4) * 2
         interval_seconds = interval_hours * 3600
     else:  # balanced, manual
-        interval_hours = cron_config.get("normal_interval_hours", 1)
+        interval_hours = cron_config.get("normal_interval_hours", 4)
         interval_seconds = interval_hours * 3600
 
     # When switching to aggressive (/away), fire immediately then repeat
