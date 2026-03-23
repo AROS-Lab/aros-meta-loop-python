@@ -30,14 +30,18 @@ class TestTriggerHarnessLoop:
         mock_post_resp = MagicMock()
         mock_post_resp.status_code = 200
 
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200
-        mock_get_resp.json.return_value = []  # No running sessions
+        # Sessions GET -> no running sessions
+        sessions_resp = MagicMock(status_code=200)
+        sessions_resp.json.return_value = []
+
+        # Harness status GET -> no existing harness
+        harness_resp = MagicMock(status_code=200)
+        harness_resp.json.return_value = {"jobs": []}
 
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.get.return_value = mock_get_resp
+        mock_client.get.side_effect = [sessions_resp, harness_resp]
         mock_client.post.return_value = mock_post_resp
 
         with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
@@ -46,7 +50,6 @@ class TestTriggerHarnessLoop:
         assert result["status"] == "dispatched"
         assert result["task_count"] == 1
         mock_client.post.assert_called_once()
-        # Verify bot_token is included in the payload
         call_kwargs = mock_client.post.call_args
         payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert "bot_token" in payload
@@ -74,7 +77,8 @@ class TestTriggerHarnessLoop:
         ]
 
         with patch.object(trigger, "is_harness_running", return_value=False):
-            result = trigger.trigger_harness_loop(yellow_tasks)
+            with patch.object(trigger, "get_harness_state", return_value=None):
+                result = trigger.trigger_harness_loop(yellow_tasks)
 
         assert result["status"] == "skipped"
         assert result["reason"] == "no GREEN tasks to auto-dispatch"
@@ -92,14 +96,15 @@ class TestTriggerHarnessLoop:
     def test_trigger_handles_gateway_error(self, trigger):
         """Mock httpx raising exception, verify error result."""
         with patch.object(trigger, "is_harness_running", return_value=False):
-            with patch("aros_meta_loop.services.harness_trigger.httpx.Client") as mock_cls:
-                mock_client = MagicMock()
-                mock_client.__enter__ = MagicMock(return_value=mock_client)
-                mock_client.__exit__ = MagicMock(return_value=False)
-                mock_client.post.side_effect = httpx.ConnectError("Connection refused")
-                mock_cls.return_value = mock_client
+            with patch.object(trigger, "get_harness_state", return_value=None):
+                with patch("aros_meta_loop.services.harness_trigger.httpx.Client") as mock_cls:
+                    mock_client = MagicMock()
+                    mock_client.__enter__ = MagicMock(return_value=mock_client)
+                    mock_client.__exit__ = MagicMock(return_value=False)
+                    mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+                    mock_cls.return_value = mock_client
 
-                result = trigger.trigger_harness_loop([_make_task()])
+                    result = trigger.trigger_harness_loop([_make_task()])
 
         assert result["status"] == "error"
         assert "Connection refused" in result["reason"]
@@ -146,3 +151,112 @@ class TestIsHarnessRunning:
             mock_cls.return_value = mock_client
 
             assert trigger.is_harness_running() is False
+
+
+class TestResumeAndCleanup:
+    def test_resumes_unfinished_harness(self, trigger):
+        """When an unfinished resumable harness exists, resume it instead of creating new."""
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        # is_harness_running -> False (not actively busy)
+        sessions_resp = MagicMock(status_code=200)
+        sessions_resp.json.return_value = []
+
+        # get_harness_state -> unfinished harness with pending tasks
+        harness_resp = MagicMock(status_code=200)
+        harness_resp.json.return_value = {"jobs": [{
+            "harness": {
+                "project_name": "test-project",
+                "current_phase": "engineering",
+                "total": 5, "done": 2, "pending": 3, "in_progress": 0, "blocked": 0,
+            }
+        }]}
+
+        # resume POST -> 200
+        resume_resp = MagicMock(status_code=200)
+
+        mock_client.get.side_effect = [sessions_resp, harness_resp]
+        mock_client.post.return_value = resume_resp
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.trigger_harness_loop([_make_task()])
+
+        assert result["status"] == "resumed"
+
+    def test_cleans_up_non_resumable_harness(self, trigger):
+        """When harness exists but all tasks are blocked/failed, cleanup and start new."""
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        # is_harness_running -> False
+        sessions_resp = MagicMock(status_code=200)
+        sessions_resp.json.return_value = []
+
+        # get_harness_state -> stuck harness (no pending, no in_progress, not complete)
+        harness_resp = MagicMock(status_code=200)
+        harness_resp.json.return_value = {"jobs": [{
+            "harness": {
+                "project_name": "stuck-project",
+                "current_phase": "engineering",
+                "total": 5, "done": 3, "pending": 0, "in_progress": 0, "blocked": 2,
+            }
+        }]}
+
+        # cleanup POST -> 200
+        cleanup_resp = MagicMock(status_code=200)
+        cleanup_resp.json.return_value = {"cleaned": 1}
+
+        # new dispatch POST -> 200
+        dispatch_resp = MagicMock(status_code=200)
+
+        mock_client.get.side_effect = [sessions_resp, harness_resp]
+        mock_client.post.side_effect = [cleanup_resp, dispatch_resp]
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.trigger_harness_loop([_make_task()])
+
+        assert result["status"] == "dispatched"
+
+    def test_cleans_up_completed_before_new(self, trigger):
+        """When previous harness is complete, archive it before starting new."""
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        sessions_resp = MagicMock(status_code=200)
+        sessions_resp.json.return_value = []
+
+        harness_resp = MagicMock(status_code=200)
+        harness_resp.json.return_value = {"jobs": [{
+            "harness": {
+                "project_name": "done-project",
+                "current_phase": "complete",
+                "total": 4, "done": 4, "pending": 0, "in_progress": 0, "blocked": 0,
+            }
+        }]}
+
+        cleanup_resp = MagicMock(status_code=200)
+        cleanup_resp.json.return_value = {"cleaned": 1}
+        dispatch_resp = MagicMock(status_code=200)
+
+        mock_client.get.side_effect = [sessions_resp, harness_resp]
+        mock_client.post.side_effect = [cleanup_resp, dispatch_resp]
+
+        with patch("aros_meta_loop.services.harness_trigger.httpx.Client", return_value=mock_client):
+            result = trigger.trigger_harness_loop([_make_task()])
+
+        assert result["status"] == "dispatched"
+
+    def test_is_resumable_logic(self, trigger):
+        """Test _is_resumable with various harness states."""
+        # Complete -> not resumable
+        assert trigger._is_resumable({"harness": {"current_phase": "complete", "total": 4, "done": 4, "pending": 0, "in_progress": 0}}) is False
+        # Has pending -> resumable
+        assert trigger._is_resumable({"harness": {"current_phase": "engineering", "total": 4, "done": 2, "pending": 2, "in_progress": 0}}) is True
+        # Has in_progress -> resumable
+        assert trigger._is_resumable({"harness": {"current_phase": "engineering", "total": 4, "done": 2, "pending": 0, "in_progress": 1}}) is True
+        # Empty -> not resumable
+        assert trigger._is_resumable({"harness": {"current_phase": "init", "total": 0, "done": 0, "pending": 0, "in_progress": 0}}) is False
