@@ -61,6 +61,17 @@ class StateManager:
                     continue
         return entries
 
+    def log_task_generation(self, cycle_num: int, tasks: list[dict], trigger_results: dict) -> None:
+        """Log auto-generated tasks to evolution-log.jsonl."""
+        entry = {
+            "type": "task_generation",
+            "cycle_num": cycle_num,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tasks_generated": tasks,
+            "trigger_results": trigger_results,
+        }
+        self.append_evolution(entry)
+
     def push_signal(self, signal_dict: dict) -> None:
         """Write signal as timestamped JSON file in signals/."""
         signals_dir = self.state_dir / "signals"
@@ -103,6 +114,71 @@ class StateManager:
             return json.loads(path.read_text())
         except Exception:
             return None
+
+    # --- Pending approval queue for YELLOW tasks ---
+
+    def _pending_approvals_path(self) -> Path:
+        return self.state_dir / "pending-approvals.json"
+
+    def _read_pending_approvals(self) -> list[dict]:
+        path = self._pending_approvals_path()
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def _write_pending_approvals(self, approvals: list[dict]) -> None:
+        path = self._pending_approvals_path()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(approvals, indent=2))
+        os.replace(str(tmp), str(path))
+
+    def add_pending_approval(self, approval: dict) -> str:
+        """Add a YELLOW task to the pending approval queue. Returns approval_id."""
+        approval_id = uuid.uuid4().hex[:12]
+        entry = {
+            "id": approval_id,
+            "task": approval.get("task", approval),
+            "cycle_num": approval.get("cycle_num"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+        }
+        approvals = self._read_pending_approvals()
+        approvals.append(entry)
+        self._write_pending_approvals(approvals)
+        logger.info(f"Added pending approval: {approval_id}")
+        return approval_id
+
+    def get_pending_approvals(self) -> list[dict]:
+        """Get all pending approvals."""
+        return self._read_pending_approvals()
+
+    def approve_task(self, approval_id: str) -> dict | None:
+        """Mark approval as approved, return the task details."""
+        approvals = self._read_pending_approvals()
+        for entry in approvals:
+            if entry["id"] == approval_id and entry["status"] == "pending":
+                entry["status"] = "approved"
+                entry["approved_at"] = datetime.now(timezone.utc).isoformat()
+                self._write_pending_approvals(approvals)
+                logger.info(f"Approved pending task: {approval_id}")
+                return entry
+        return None
+
+    def reject_task(self, approval_id: str, reason: str = "") -> dict | None:
+        """Mark approval as rejected with reason."""
+        approvals = self._read_pending_approvals()
+        for entry in approvals:
+            if entry["id"] == approval_id and entry["status"] == "pending":
+                entry["status"] = "rejected"
+                entry["rejected_at"] = datetime.now(timezone.utc).isoformat()
+                entry["reject_reason"] = reason
+                self._write_pending_approvals(approvals)
+                logger.info(f"Rejected pending task: {approval_id} — {reason}")
+                return entry
+        return None
 
     def has_urgent(self) -> bool:
         """Check if any signal has priority='urgent' without consuming."""

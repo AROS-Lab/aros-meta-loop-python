@@ -13,6 +13,7 @@ from aros_meta_loop.models.signals import (
 from aros_meta_loop.services.event_emitter import EventEmitter
 from aros_meta_loop.services.metrics import L1Collector, L2Evaluator, L3SignalDeriver
 from aros_meta_loop.services.state_manager import StateManager
+from aros_meta_loop.services.task_planner import TaskPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ class PolicyChangeClassifier:
 
 
 class MetaLoopEngine:
-    """Implements the 6-step meta-cognition cycle."""
+    """Implements the 7-step meta-cognition cycle."""
 
     def __init__(self, state_manager: StateManager | None = None, bot_id: str = "default"):
         self.state = state_manager or StateManager()
@@ -376,6 +377,12 @@ class MetaLoopEngine:
         # Step 6: PERSIST
         self._persist(policy_changes, identity_verdict)
         self._cycle_log["steps_completed"] = 6
+
+        # Step 7: PLAN (autonomous task generation)
+        planned_tasks = self._plan_tasks(perceive_data)
+        if planned_tasks:
+            self._cycle_log["planned_tasks"] = planned_tasks
+            self._cycle_log["steps_completed"] = 7
 
         return self._finalize_cycle("completed")
 
@@ -668,6 +675,84 @@ class MetaLoopEngine:
                     for c in auto_approved
                 ],
             })
+
+    def _plan_tasks(self, perceive_data: dict) -> list[dict]:
+        """Step 7: Generate improvement tasks if goals are below threshold and in aggressive mode."""
+        cadence = self.state.read_cadence()
+        mode = cadence.get("mode", "balanced")
+
+        # Only auto-plan in aggressive mode (Nirmana active via /away)
+        if mode != "aggressive":
+            logger.debug("PLAN step skipped: not in aggressive mode")
+            return []
+
+        scores = perceive_data.get("l2_scores", {})
+        below = scores.get("below_threshold", [])
+
+        if not below:
+            logger.debug("PLAN step skipped: all goals above threshold")
+            return []
+
+        planner = TaskPlanner()
+        tasks = planner.generate_tasks(scores, below)
+
+        # Split into GREEN and YELLOW
+        from aros_meta_loop.services.task_planner import AuthorityLevel
+        green_tasks = [t for t in tasks if t.authority_level == AuthorityLevel.GREEN]
+        yellow_tasks = [t for t in tasks if t.authority_level == AuthorityLevel.YELLOW]
+
+        # Convert to serializable dicts for logging
+        task_dicts = [
+            {
+                "title": t.title,
+                "description": t.description,
+                "target_project": t.target_project,
+                "authority_level": t.authority_level.value,
+                "estimated_minutes": t.estimated_minutes,
+                "goal_source": t.goal_source,
+            }
+            for t in tasks
+        ]
+
+        logger.info(
+            f"PLAN step: generated {len(task_dicts)} tasks "
+            f"({len(green_tasks)} GREEN, {len(yellow_tasks)} YELLOW)"
+        )
+
+        # Queue YELLOW tasks for human approval
+        cycle_num = self._cycle_log.get("cycle_num")
+        n_yellow = 0
+        for t in yellow_tasks:
+            task_dict = {
+                "title": t.title,
+                "description": t.description,
+                "target_project": t.target_project,
+                "authority_level": t.authority_level.value,
+                "estimated_minutes": t.estimated_minutes,
+                "goal_source": t.goal_source,
+            }
+            self.state.add_pending_approval({
+                "task": task_dict,
+                "cycle_num": cycle_num,
+            })
+            n_yellow += 1
+            logger.info(f"YELLOW task queued for approval: {t.title}")
+
+        n_green = len(green_tasks)
+        n_skipped = len(tasks) - n_green - n_yellow
+
+        # Log task generation to evolution log
+        self.state.log_task_generation(
+            cycle_num=cycle_num or 0,
+            tasks=task_dicts,
+            trigger_results={
+                "green_dispatched": n_green,
+                "yellow_queued": n_yellow,
+                "skipped": n_skipped,
+            },
+        )
+
+        return task_dicts
 
     def _check_cadence_limits(self, trigger: str) -> str | None:
         """Check if cadence limits allow a new cycle. Returns rejection reason or None."""

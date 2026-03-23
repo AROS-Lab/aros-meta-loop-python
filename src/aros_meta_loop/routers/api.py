@@ -104,6 +104,43 @@ async def get_evolution_log(limit: int = 50):
     return {"entries": entries, "count": len(entries)}
 
 
+@router.get("/evolution-log/summary")
+async def get_evolution_log_summary():
+    """Get aggregate stats from evolution log."""
+    engine = get_engine()
+    entries = engine.state.read_evolution_log(limit=10000)
+    task_gen_entries = [e for e in entries if e.get("type") == "task_generation"]
+
+    total_tasks = sum(len(e.get("tasks_generated", [])) for e in task_gen_entries)
+    total_dispatched = sum(
+        e.get("trigger_results", {}).get("green_dispatched", 0) for e in task_gen_entries
+    )
+    total_queued = sum(
+        e.get("trigger_results", {}).get("yellow_queued", 0) for e in task_gen_entries
+    )
+
+    green_count = sum(
+        1
+        for e in task_gen_entries
+        for t in e.get("tasks_generated", [])
+        if t.get("authority_level") == "GREEN"
+    )
+    yellow_count = sum(
+        1
+        for e in task_gen_entries
+        for t in e.get("tasks_generated", [])
+        if t.get("authority_level") == "YELLOW"
+    )
+
+    return {
+        "total_cycles_with_tasks": len(task_gen_entries),
+        "total_tasks_generated": total_tasks,
+        "total_dispatched": total_dispatched,
+        "total_queued": total_queued,
+        "by_authority": {"GREEN": green_count, "YELLOW": yellow_count},
+    }
+
+
 @router.post("/approve/{change_id}")
 async def approve_change(change_id: str):
     """Approve a pending HUMAN-REVIEW change."""
@@ -154,6 +191,57 @@ async def get_pending_approvals():
             except Exception:
                 continue
     return {"pending": pending, "count": len(pending)}
+
+
+@router.get("/pending-task-approvals")
+async def get_pending_task_approvals():
+    """List YELLOW tasks awaiting human approval."""
+    engine = get_engine()
+    approvals = engine.state.get_pending_approvals()
+    pending = [a for a in approvals if a.get("status") == "pending"]
+    return {"pending": pending, "count": len(pending)}
+
+
+@router.post("/pending-task-approvals/{approval_id}/approve")
+async def approve_pending_task(approval_id: str, background_tasks: BackgroundTasks):
+    """Approve a pending YELLOW task and trigger execution via HarnessTrigger."""
+    engine = get_engine()
+    result = engine.state.approve_task(approval_id)
+    if result is None:
+        raise HTTPException(404, f"Pending approval {approval_id} not found or already processed")
+
+    # Trigger the task via HarnessTrigger
+    from aros_meta_loop.services.harness_trigger import HarnessTrigger
+    from aros_meta_loop.services.task_planner import PlannedTask, AuthorityLevel
+
+    task_data = result.get("task", {})
+    planned_task = PlannedTask(
+        title=task_data.get("title", "Approved task"),
+        description=task_data.get("description", ""),
+        target_project=task_data.get("target_project", ""),
+        authority_level=AuthorityLevel.GREEN,  # Approved → treat as GREEN for dispatch
+        estimated_minutes=task_data.get("estimated_minutes", 15),
+        goal_source=task_data.get("goal_source", ""),
+    )
+
+    trigger = HarnessTrigger()
+
+    async def dispatch():
+        trigger.trigger_harness_loop([planned_task])
+
+    background_tasks.add_task(dispatch)
+
+    return {"status": "approved", "task": task_data, "approval_id": approval_id}
+
+
+@router.post("/pending-task-approvals/{approval_id}/reject")
+async def reject_pending_task(approval_id: str, reason: str = ""):
+    """Reject a pending YELLOW task."""
+    engine = get_engine()
+    result = engine.state.reject_task(approval_id, reason)
+    if result is None:
+        raise HTTPException(404, f"Pending approval {approval_id} not found or already processed")
+    return {"status": "rejected", "reason": reason, "approval_id": approval_id}
 
 
 @router.post("/event")
