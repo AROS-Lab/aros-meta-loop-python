@@ -94,8 +94,9 @@ class HarnessTrigger:
     def _resume_harness(self) -> dict:
         """Resume an existing unfinished harness-loop."""
         resume_prompt = (
-            "Resume the harness-loop. The plan has been confirmed. "
-            "Enter the Execute Loop now. Execute all tasks following the harness-loop skill instructions."
+            "Resume the harness-loop. This is an autonomous MetaLoop dispatch - NOT a human request. "
+            "The plan was already confirmed. Do NOT output [HARNESS_EXEC_READY] or wait for /confirm. "
+            "Enter the Execute Loop now. Pick up the next batch of ready tasks and execute them."
         )
         try:
             with httpx.Client(timeout=10.0) as client:
@@ -187,7 +188,11 @@ class HarnessTrigger:
             return {"status": "error", "reason": str(e)}
 
     def _format_prompt(self, tasks: list[PlannedTask]) -> str:
-        """Format tasks into a harness-loop prompt with Nirmana persona."""
+        """Format tasks into a harness-loop prompt with Nirmana persona.
+
+        IMPORTANT: This prompt is dispatched by MetaLoop autonomously (no human in the loop).
+        It must tell Claude to skip the Phase 1 confirmation gate and go directly to execution.
+        """
         task_descriptions = []
         for i, t in enumerate(tasks, 1):
             task_descriptions.append(
@@ -198,11 +203,17 @@ class HarnessTrigger:
         tasks_text = "\n".join(task_descriptions)
 
         return (
-            f"You are Eddie-Nirmana executing an autonomous improvement cycle. "
+            f"You are Eddie-Nirmana executing an autonomous improvement cycle triggered by MetaLoop. "
             f"Read ~/eddie-nirmana/PERSONA.md for your identity.\n\n"
+            f"IMPORTANT: This is an autonomous MetaLoop dispatch - NOT a human request. "
+            f"Skip Phase 1 (requirements gathering/confirmation). The plan is already confirmed by MetaLoop. "
+            f"Do NOT output [HARNESS_EXEC_READY] or wait for /confirm. "
+            f"Go directly to task decomposition and execution.\n\n"
             f"The MetaLoop identified the following improvement tasks (all GREEN authority - auto-execute):\n\n"
             f"{tasks_text}\n\n"
-            f"Execute these tasks using the harness-loop skill. "
-            f"Create a .harness/ project, decompose into engineering tasks, and execute. "
-            f"Commit and push results when done."
+            f"Execute these tasks:\n"
+            f"1. Initialize .harness/ with these tasks as the DAG\n"
+            f"2. Enter the Execute Loop immediately\n"
+            f"3. Commit and push results when done\n"
+            f"4. Output [HARNESS_COMPLETE] when finished"
         )
