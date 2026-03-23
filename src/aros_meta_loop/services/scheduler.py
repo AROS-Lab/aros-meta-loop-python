@@ -1,6 +1,7 @@
 """APScheduler-based meta-loop trigger."""
 import logging
 import asyncio
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -38,9 +39,10 @@ def start_scheduler(engine) -> None:
         id="meta_loop_cycle",
         name="Meta Loop Cycle",
         replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),  # Fire immediately on startup
     )
     _scheduler.start()
-    logger.info(f"Scheduler started: mode={mode}, interval={interval_seconds}s")
+    logger.info(f"Scheduler started: mode={mode}, interval={interval_seconds}s (first cycle fires immediately)")
 
 
 def update_schedule(mode: str) -> None:
