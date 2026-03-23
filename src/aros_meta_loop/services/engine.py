@@ -677,13 +677,17 @@ class MetaLoopEngine:
             })
 
     def _plan_tasks(self, perceive_data: dict) -> list[dict]:
-        """Step 7: Generate improvement tasks if goals are below threshold and in aggressive mode."""
+        """Step 7: Generate improvement tasks if goals are below threshold.
+
+        Works in both aggressive and balanced modes. In balanced mode,
+        the cycle itself runs less frequently (every 4hr vs 15min),
+        so task generation is naturally throttled by cadence.
+        """
         cadence = self.state.read_cadence()
         mode = cadence.get("mode", "balanced")
 
-        # Only auto-plan in aggressive mode (Nirmana active via /away)
-        if mode != "aggressive":
-            logger.debug("PLAN step skipped: not in aggressive mode")
+        # Frozen mode: never plan
+        if mode == "frozen":
             return []
 
         scores = perceive_data.get("l2_scores", {})
