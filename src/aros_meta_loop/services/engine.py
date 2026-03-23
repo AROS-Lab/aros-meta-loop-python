@@ -1110,7 +1110,11 @@ class MetaLoopEngine:
         return {"status": "deactivated", "mode": "balanced", "briefing": briefing}
 
     def _generate_briefing(self) -> dict:
-        """Generate activity summary for Eddie's return."""
+        """Generate activity summary for Eddie's return.
+
+        Only includes actions from MetaLoop-triggered autonomous sessions
+        (task_generation entries), NOT human-initiated work.
+        """
         db = get_db()
         rows = db.execute(
             "SELECT * FROM meta_iterations WHERE bot_id = ? ORDER BY id DESC LIMIT 50",
@@ -1120,20 +1124,40 @@ class MetaLoopEngine:
         cycles_run = len(rows)
         completed = sum(1 for r in rows if r["status"] == "completed")
 
-        # Count pending reviews
-        pending_dir = self.state.state_dir / "pending-review"
-        pending_count = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
+        # Count pending task approvals (YELLOW tasks awaiting review)
+        pending_task_approvals = [
+            a for a in self.state.get_pending_approvals()
+            if a.get("status") == "pending"
+        ]
+        pending_count = len(pending_task_approvals)
 
-        # Get recent evolution log
-        recent_log = self.state.read_evolution_log(limit=10)
+        # Get evolution log — only autonomous actions (task_generation entries)
+        recent_log = self.state.read_evolution_log(limit=50)
+        autonomous_actions = [
+            e for e in recent_log
+            if e.get("type") == "task_generation"
+        ]
 
         return {
             "cycles_run": cycles_run,
             "cycles_completed": completed,
-            "decisions_made": len(self._nirmana_briefing),
-            "pending_reviews": pending_count,
-            "recent_activity": recent_log[-5:] if recent_log else [],
-            "summary": f"Ran {cycles_run} cycles ({completed} completed), {pending_count} items awaiting review.",
+            "autonomous_tasks_generated": sum(
+                len(e.get("tasks_generated", [])) for e in autonomous_actions
+            ),
+            "autonomous_tasks_dispatched": sum(
+                e.get("trigger_results", {}).get("green_dispatched", 0) for e in autonomous_actions
+            ),
+            "pending_yellow_approvals": pending_count,
+            "pending_approvals_detail": [
+                {"title": a["task"]["title"], "authority": a["task"]["authority_level"]}
+                for a in pending_task_approvals
+            ] if pending_task_approvals else [],
+            "autonomous_activity": autonomous_actions[-5:] if autonomous_actions else [],
+            "summary": (
+                f"Nirmana ran {cycles_run} MetaLoop cycles ({completed} completed). "
+                f"Auto-generated {sum(len(e.get('tasks_generated', [])) for e in autonomous_actions)} tasks, "
+                f"{pending_count} YELLOW tasks awaiting your review."
+            ),
         }
 
     def get_status(self) -> dict:

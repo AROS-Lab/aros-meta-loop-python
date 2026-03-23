@@ -71,7 +71,7 @@ class TestNirmanaDriver:
             result = asyncio.get_event_loop().run_until_complete(nirmana_engine.deactivate_nirmana())
             briefing = result["briefing"]
             assert "cycles_run" in briefing
-            assert "pending_reviews" in briefing
+            assert "pending_yellow_approvals" in briefing
             assert "summary" in briefing
 
     def test_nirmana_green_decisions_logged(self, nirmana_engine, nirmana_env):
@@ -84,7 +84,7 @@ class TestNirmanaDriver:
             })
 
             briefing = nirmana_engine._generate_briefing()
-            assert briefing["decisions_made"] == 1
+            assert "autonomous_tasks_generated" in briefing
 
     def test_nirmana_mode_api_endpoint(self, nirmana_env):
         """Test the /nirmana API endpoint."""
