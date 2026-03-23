@@ -1,14 +1,38 @@
-"""Task Planner — generates improvement tasks from meta-goal analysis and project backlog."""
-from dataclasses import dataclass, field
+"""Task Planner — generates improvement tasks from three sources:
+1. night-runner-projects.md backlog (materialized project registry)
+2. GitHub issues (AROS-Lab repos + infra repos)
+3. Chat history (unfinished requests from Eddie)
+"""
+from dataclasses import dataclass
 from pathlib import Path
 from enum import Enum
+import json
 import logging
 import re
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 NIGHT_RUNNER_PROJECTS = Path.home() / "eddie-nirmana" / "state" / "night-runner-projects.md"
 MAX_TASKS_PER_CYCLE = 5
+
+# Repos to scan for GitHub issues
+GITHUB_REPOS = [
+    "AROS-Lab/aros-kernel",
+    "AROS-Lab/aros-meta-loop",
+    "spacelobster88/mini-claude-bot",
+    "spacelobster88/telegram-claude-hero",
+    "spacelobster88/centurion",
+]
+
+# Project path mapping
+REPO_TO_PROJECT = {
+    "AROS-Lab/aros-kernel": "~/Projects/aros-kernel",
+    "AROS-Lab/aros-meta-loop": "~/Projects/aros-meta-loop",
+    "spacelobster88/mini-claude-bot": "~/Projects/mini-claude-bot",
+    "spacelobster88/telegram-claude-hero": "~/Projects/telegram-claude-hero",
+    "spacelobster88/centurion": "~/Projects/centurion",
+}
 
 
 class AuthorityLevel(Enum):
@@ -20,24 +44,26 @@ class AuthorityLevel(Enum):
 class PlannedTask:
     title: str
     description: str
-    target_project: str        # e.g. "~/Projects/aros-kernel"
+    target_project: str
     authority_level: AuthorityLevel
     estimated_minutes: int = 15
-    goal_source: str = ""      # Which meta-goal triggered this (e.g. "G5_ambitious")
-    backlog_item: str = ""     # Reference to night-runner backlog item if applicable
+    goal_source: str = ""
+    backlog_item: str = ""
+    source: str = ""  # "backlog", "github_issue", "chat_history"
 
 
 class TaskPlanner:
-    """Generates improvement tasks from meta-goal analysis and project backlog."""
+    """Generates improvement tasks from meta-goal analysis, GitHub issues, and chat history."""
 
     def __init__(self, backlog_path: Path = NIGHT_RUNNER_PROJECTS):
         self.backlog_path = backlog_path
         self._backlog_cache: str | None = None
+        self._issues_cache: list[dict] | None = None
 
     def generate_tasks(
         self,
-        scores: dict,              # {"G1_truthful": 1.0, "G5_ambitious": 0.1, ...}
-        below_threshold: list[str], # ["G2_efficient", "G5_ambitious"]
+        scores: dict,
+        below_threshold: list[str],
     ) -> list[PlannedTask]:
         """Generate improvement tasks based on low-scoring goals."""
         if not below_threshold:
@@ -48,7 +74,6 @@ class TaskPlanner:
         for goal in below_threshold:
             if len(tasks) >= MAX_TASKS_PER_CYCLE:
                 break
-
             new_tasks = self._tasks_for_goal(goal, scores)
             tasks.extend(new_tasks)
 
@@ -70,96 +95,9 @@ class TaskPlanner:
             return self._self_knowledge_tasks()
         return []
 
-    def _efficiency_tasks(self) -> list[PlannedTask]:
-        """G2 low: optimize code, reduce token usage."""
-        return [
-            PlannedTask(
-                title="Optimize aros-kernel build times",
-                description="Profile cargo build, identify slow compilation units, optimize Cargo.toml features and dependencies",
-                target_project="~/Projects/aros-kernel",
-                authority_level=AuthorityLevel.GREEN,
-                estimated_minutes=20,
-                goal_source="G2_efficient",
-            ),
-        ]
-
-    def _reliability_tasks(self) -> list[PlannedTask]:
-        """G3 low: add tests, fix flaky tests."""
-        return [
-            PlannedTask(
-                title="Add missing test coverage for aros-kernel",
-                description="Run cargo test, identify modules with low coverage, add unit tests for untested functions",
-                target_project="~/Projects/aros-kernel",
-                authority_level=AuthorityLevel.GREEN,
-                estimated_minutes=30,
-                goal_source="G3_reliable",
-            ),
-        ]
-
-    def _ambitious_tasks(self) -> list[PlannedTask]:
-        """G5 low: pick from night-runner backlog."""
-        backlog = self._read_backlog()
-        tasks = []
-
-        if not backlog:
-            # Fallback: generic improvement task
-            tasks.append(PlannedTask(
-                title="Improve aros-kernel hardware awareness",
-                description="Add event bus, throttle, or memory audit to aros-kernel based on gap analysis from Python Centurion",
-                target_project="~/Projects/aros-kernel",
-                authority_level=AuthorityLevel.YELLOW,
-                estimated_minutes=30,
-                goal_source="G5_ambitious",
-            ))
-            return tasks
-
-        # Parse backlog for actionable items
-        backlog_items = self._parse_backlog_items(backlog)
-        for item in backlog_items[:2]:  # Max 2 from backlog
-            tasks.append(PlannedTask(
-                title=item["title"],
-                description=item["description"],
-                target_project=item.get("project", "~/Projects/aros-kernel"),
-                authority_level=AuthorityLevel.YELLOW if item.get("is_new_feature") else AuthorityLevel.GREEN,
-                estimated_minutes=item.get("est_minutes", 20),
-                goal_source="G5_ambitious",
-                backlog_item=item["title"],
-            ))
-
-        return tasks
-
-    def _truthfulness_tasks(self) -> list[PlannedTask]:
-        return [PlannedTask(
-            title="Improve error reporting accuracy",
-            description="Review error messages and logging in aros-meta-loop for accuracy and clarity",
-            target_project="~/Projects/aros-meta-loop",
-            authority_level=AuthorityLevel.GREEN,
-            estimated_minutes=15,
-            goal_source="G1_truthful",
-        )]
-
-    def _alignment_tasks(self) -> list[PlannedTask]:
-        return [PlannedTask(
-            title="Review tool call patterns for alignment",
-            description="Analyze recent tool call failures and improve error handling",
-            target_project="~/Projects/mini-claude-bot",
-            authority_level=AuthorityLevel.GREEN,
-            estimated_minutes=15,
-            goal_source="G4_aligned",
-        )]
-
-    def _self_knowledge_tasks(self) -> list[PlannedTask]:
-        return [PlannedTask(
-            title="Improve self-model calibration",
-            description="Review self-model.toml accuracy against actual performance data",
-            target_project="~/Projects/aros-meta-loop",
-            authority_level=AuthorityLevel.GREEN,
-            estimated_minutes=15,
-            goal_source="G6_self_know",
-        )]
+    # ── Source 1: Night Runner Backlog ──────────────────────────────
 
     def _read_backlog(self) -> str:
-        """Read the night-runner-projects.md backlog file."""
         if self._backlog_cache is not None:
             return self._backlog_cache
         try:
@@ -172,25 +110,297 @@ class TaskPlanner:
         return ""
 
     def _parse_backlog_items(self, backlog: str) -> list[dict]:
-        """Parse the night-runner-projects.md into actionable items."""
+        """Parse night-runner-projects.md for actionable backlog items."""
         items = []
-        # Look for "Task Backlog" section and extract numbered items
         in_backlog = False
+        current_project = "~/Projects/aros-kernel"
+
         for line in backlog.split("\n"):
+            # Detect section headers
             if "Task Backlog" in line or "Backlog" in line:
                 in_backlog = True
                 continue
-            if in_backlog and line.startswith("##"):
-                break  # Next section
+            if in_backlog and line.startswith("## "):
+                break
+
+            # Detect project context from nearby headers
+            if "aros-kernel" in line.lower():
+                current_project = "~/Projects/aros-kernel"
+            elif "mini-claude-bot" in line.lower():
+                current_project = "~/Projects/mini-claude-bot"
+            elif "telegram" in line.lower():
+                current_project = "~/Projects/telegram-claude-hero"
+            elif "centurion" in line.lower():
+                current_project = "~/Projects/centurion"
+            elif "meta-loop" in line.lower() or "metaloop" in line.lower():
+                current_project = "~/Projects/aros-meta-loop"
+
             if in_backlog and (line.startswith("- ") or re.match(r"^\d+\.", line)):
-                # Extract task title and description
                 text = re.sub(r"^[-\d.]+\s*", "", line).strip()
-                if text:
+                # Strip markdown bold/links
+                text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+                text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+                if text and len(text) > 10:
+                    # Classify authority based on keywords
+                    is_new = any(kw in text.lower() for kw in [
+                        "new feature", "add ", "create ", "implement ", "build ",
+                        "design ", "architect",
+                    ])
                     items.append({
                         "title": text[:80],
                         "description": text,
-                        "project": "~/Projects/aros-kernel",
-                        "is_new_feature": True,
+                        "project": current_project,
+                        "is_new_feature": is_new,
                         "est_minutes": 20,
+                        "source": "backlog",
                     })
         return items
+
+    # ── Source 2: GitHub Issues ─────────────────────────────────────
+
+    def _fetch_github_issues(self) -> list[dict]:
+        """Fetch open issues from tracked repos via gh CLI."""
+        if self._issues_cache is not None:
+            return self._issues_cache
+
+        all_issues = []
+        for repo in GITHUB_REPOS:
+            try:
+                result = subprocess.run(
+                    ["gh", "issue", "list", "-R", repo, "--json",
+                     "number,title,labels,url", "--limit", "5", "--state", "open"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    issues = json.loads(result.stdout)
+                    for issue in issues:
+                        issue["repo"] = repo
+                        issue["project"] = REPO_TO_PROJECT.get(repo, f"~/Projects/{repo.split('/')[-1]}")
+                    all_issues.extend(issues)
+            except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+                logger.debug(f"Could not fetch issues from {repo}: {e}")
+
+        self._issues_cache = all_issues
+        return all_issues
+
+    def _issues_to_tasks(self, issues: list[dict], goal_source: str) -> list[PlannedTask]:
+        """Convert GitHub issues to PlannedTasks."""
+        tasks = []
+        for issue in issues[:3]:  # Max 3 from issues
+            labels = [l.get("name", "") for l in issue.get("labels", [])]
+            # Classify authority
+            is_bug = any(l in ("bug", "fix", "patch") for l in labels)
+            authority = AuthorityLevel.GREEN if is_bug else AuthorityLevel.YELLOW
+
+            tasks.append(PlannedTask(
+                title=f"[{issue['repo'].split('/')[-1]}#{issue['number']}] {issue['title'][:60]}",
+                description=f"Fix GitHub issue {issue['repo']}#{issue['number']}: {issue['title']}. URL: {issue.get('url', '')}",
+                target_project=issue["project"],
+                authority_level=authority,
+                estimated_minutes=20,
+                goal_source=goal_source,
+                backlog_item=f"{issue['repo']}#{issue['number']}",
+                source="github_issue",
+            ))
+        return tasks
+
+    # ── Source 3: Chat History ──────────────────────────────────────
+
+    def _search_chat_history(self, query: str) -> list[dict]:
+        """Search chat history via mini-claude-bot API for unfinished work."""
+        try:
+            import httpx
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(
+                    "http://localhost:8000/api/chat/search",
+                    json={"query": query, "limit": 5, "bot_id": "mini_claude_bot"},
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("result", [])
+        except Exception as e:
+            logger.debug(f"Chat history search failed: {e}")
+        return []
+
+    def _chat_to_tasks(self, results: list[dict], goal_source: str) -> list[PlannedTask]:
+        """Convert chat history results to PlannedTasks if they contain unfinished work."""
+        tasks = []
+        seen_titles = set()
+        for r in results:
+            content = r.get("content", "")
+            # Look for actionable patterns in user messages
+            if r.get("role") != "user":
+                continue
+            # Skip short messages
+            if len(content) < 20:
+                continue
+            # Extract actionable phrases
+            title = content[:80].strip()
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+
+            # Detect project context
+            project = "~/Projects/aros-kernel"
+            if "mini-claude-bot" in content.lower():
+                project = "~/Projects/mini-claude-bot"
+            elif "telegram" in content.lower():
+                project = "~/Projects/telegram-claude-hero"
+            elif "centurion" in content.lower():
+                project = "~/Projects/centurion"
+            elif "meta-loop" in content.lower() or "metaloop" in content.lower():
+                project = "~/Projects/aros-meta-loop"
+
+            tasks.append(PlannedTask(
+                title=title,
+                description=content[:200],
+                target_project=project,
+                authority_level=AuthorityLevel.YELLOW,
+                estimated_minutes=20,
+                goal_source=goal_source,
+                source="chat_history",
+            ))
+        return tasks[:2]  # Max 2 from chat
+
+    # ── Goal-specific task generators ──────────────────────────────
+
+    def _efficiency_tasks(self) -> list[PlannedTask]:
+        """G2 low: find efficiency improvements from issues or backlog."""
+        # Try GitHub issues with performance/optimization labels first
+        issues = self._fetch_github_issues()
+        perf_issues = [i for i in issues if any(
+            l.get("name", "") in ("performance", "optimization", "efficiency")
+            for l in i.get("labels", [])
+        )]
+        if perf_issues:
+            return self._issues_to_tasks(perf_issues, "G2_efficient")
+
+        # Fallback to backlog
+        backlog = self._read_backlog()
+        if backlog:
+            items = self._parse_backlog_items(backlog)
+            opt_items = [i for i in items if any(
+                kw in i["description"].lower()
+                for kw in ["optimize", "performance", "efficient", "speed", "fast"]
+            )]
+            if opt_items:
+                return [PlannedTask(
+                    title=opt_items[0]["title"],
+                    description=opt_items[0]["description"],
+                    target_project=opt_items[0]["project"],
+                    authority_level=AuthorityLevel.GREEN,
+                    estimated_minutes=20,
+                    goal_source="G2_efficient",
+                    source="backlog",
+                )]
+
+        # Final fallback
+        return [PlannedTask(
+            title="Optimize aros-kernel build times",
+            description="Profile cargo build, identify slow compilation units, optimize Cargo.toml features and dependencies",
+            target_project="~/Projects/aros-kernel",
+            authority_level=AuthorityLevel.GREEN,
+            estimated_minutes=20,
+            goal_source="G2_efficient",
+            source="fallback",
+        )]
+
+    def _reliability_tasks(self) -> list[PlannedTask]:
+        """G3 low: find bugs and test gaps from issues."""
+        issues = self._fetch_github_issues()
+        bug_issues = [i for i in issues if any(
+            l.get("name", "") in ("bug", "fix", "test", "flaky")
+            for l in i.get("labels", [])
+        )]
+        if bug_issues:
+            return self._issues_to_tasks(bug_issues, "G3_reliable")
+
+        return [PlannedTask(
+            title="Add missing test coverage",
+            description="Scan all AROS projects for modules with low test coverage, add tests for critical paths",
+            target_project="~/Projects/aros-kernel",
+            authority_level=AuthorityLevel.GREEN,
+            estimated_minutes=30,
+            goal_source="G3_reliable",
+            source="fallback",
+        )]
+
+    def _ambitious_tasks(self) -> list[PlannedTask]:
+        """G5 low: discover work from all three sources."""
+        tasks: list[PlannedTask] = []
+
+        # Source 1: GitHub issues (highest priority - concrete, trackable)
+        issues = self._fetch_github_issues()
+        if issues:
+            tasks.extend(self._issues_to_tasks(issues[:2], "G5_ambitious"))
+
+        # Source 2: Night-runner backlog
+        if len(tasks) < MAX_TASKS_PER_CYCLE:
+            backlog = self._read_backlog()
+            if backlog:
+                items = self._parse_backlog_items(backlog)
+                for item in items[:2]:
+                    if len(tasks) >= MAX_TASKS_PER_CYCLE:
+                        break
+                    tasks.append(PlannedTask(
+                        title=item["title"],
+                        description=item["description"],
+                        target_project=item.get("project", "~/Projects/aros-kernel"),
+                        authority_level=AuthorityLevel.YELLOW if item.get("is_new_feature") else AuthorityLevel.GREEN,
+                        estimated_minutes=item.get("est_minutes", 20),
+                        goal_source="G5_ambitious",
+                        backlog_item=item["title"],
+                        source="backlog",
+                    ))
+
+        # Source 3: Chat history (lowest priority - may be stale)
+        if len(tasks) < MAX_TASKS_PER_CYCLE:
+            chat_results = self._search_chat_history("unfinished TODO improve fix implement")
+            if chat_results:
+                tasks.extend(self._chat_to_tasks(chat_results, "G5_ambitious"))
+
+        # Fallback if nothing found
+        if not tasks:
+            tasks.append(PlannedTask(
+                title="Improve aros-kernel hardware awareness",
+                description="Add event bus, throttle, or memory audit to aros-kernel based on gap analysis",
+                target_project="~/Projects/aros-kernel",
+                authority_level=AuthorityLevel.YELLOW,
+                estimated_minutes=30,
+                goal_source="G5_ambitious",
+                source="fallback",
+            ))
+
+        return tasks
+
+    def _truthfulness_tasks(self) -> list[PlannedTask]:
+        return [PlannedTask(
+            title="Improve error reporting accuracy",
+            description="Review error messages and logging in aros-meta-loop for accuracy and clarity",
+            target_project="~/Projects/aros-meta-loop",
+            authority_level=AuthorityLevel.GREEN,
+            estimated_minutes=15,
+            goal_source="G1_truthful",
+            source="fallback",
+        )]
+
+    def _alignment_tasks(self) -> list[PlannedTask]:
+        return [PlannedTask(
+            title="Review tool call patterns for alignment",
+            description="Analyze recent tool call failures and improve error handling",
+            target_project="~/Projects/mini-claude-bot",
+            authority_level=AuthorityLevel.GREEN,
+            estimated_minutes=15,
+            goal_source="G4_aligned",
+            source="fallback",
+        )]
+
+    def _self_knowledge_tasks(self) -> list[PlannedTask]:
+        return [PlannedTask(
+            title="Improve self-model calibration",
+            description="Review self-model.toml accuracy against actual performance data",
+            target_project="~/Projects/aros-meta-loop",
+            authority_level=AuthorityLevel.GREEN,
+            estimated_minutes=15,
+            goal_source="G6_self_know",
+            source="fallback",
+        )]
