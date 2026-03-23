@@ -251,22 +251,68 @@ class TaskPlanner:
             ))
         return tasks
 
-    # ── Source 3: Chat History ──────────────────────────────────────
+    # ── Source 3: Chat History (local ~/.claude/projects/) ───────────
 
     def _search_chat_history(self, query: str) -> list[dict]:
-        """Search chat history via mini-claude-bot API for unfinished work."""
+        """Search chat history from local ~/.claude/projects/ JSONL files.
+
+        Scans recent JSONL conversation logs for user messages containing
+        actionable keywords (TODO, fix, implement, add, etc).
+        """
+        from pathlib import Path
+        import glob
+
+        claude_projects = Path.home() / ".claude" / "projects"
+        if not claude_projects.exists():
+            return []
+
+        results = []
+        keywords = query.lower().split()
+
+        # Find recent JSONL files (modified in last 7 days)
         try:
-            import httpx
-            with httpx.Client(timeout=5.0) as client:
-                resp = client.post(
-                    "http://localhost:8000/api/chat/search",
-                    json={"query": query, "limit": 5, "bot_id": "mini_claude_bot"},
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("result", [])
+            import time
+            cutoff = time.time() - 7 * 86400
+            jsonl_files = sorted(
+                claude_projects.glob("*/*.jsonl"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            # Only scan the 10 most recent files
+            for jsonl_path in jsonl_files[:10]:
+                if jsonl_path.stat().st_mtime < cutoff:
+                    continue
+                try:
+                    with open(jsonl_path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                                content = entry.get("content", "")
+                                entry_type = entry.get("type", "")
+                                # Only look at user messages (enqueue operations)
+                                if entry_type != "queue-operation" or entry.get("operation") != "enqueue":
+                                    continue
+                                if not content or len(content) < 20:
+                                    continue
+                                # Check if content matches any keywords
+                                content_lower = content.lower()
+                                if any(kw in content_lower for kw in keywords):
+                                    results.append({
+                                        "role": "user",
+                                        "content": content[:300],
+                                        "source": str(jsonl_path.name),
+                                    })
+                            except json.JSONDecodeError:
+                                continue
+                except Exception:
+                    continue
         except Exception as e:
-            logger.debug(f"Chat history search failed: {e}")
-        return []
+            logger.debug(f"Chat history scan failed: {e}")
+
+        return results[-5:]  # Return last 5 matches
 
     def _chat_to_tasks(self, results: list[dict], goal_source: str) -> list[PlannedTask]:
         """Convert chat history results to PlannedTasks if they contain unfinished work."""
