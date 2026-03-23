@@ -187,12 +187,12 @@ class HarnessTrigger:
             return {"status": "error", "reason": str(e)}
 
     def _format_prompt(self, tasks: list[PlannedTask]) -> str:
-        """Format tasks into a harness-loop prompt with Nirmana persona.
+        """Format tasks into a harness-loop prompt for autonomous execution.
 
-        The prompt tells Claude to go through Phase 1 (requirements/design) normally,
-        but self-confirm as Eddie-Nirmana instead of waiting for human input.
-        After confirmation, output [HARNESS_EXEC_READY] as normal — Eddie-Nirmana
-        will handle the /confirm command automatically.
+        The prompt tells Claude to:
+        1. Spawn a Nirmana subagent to review and confirm the task plan
+        2. If Nirmana approves, proceed directly to execution
+        3. Skip [HARNESS_EXEC_READY] / /confirm (no Telegram in the loop)
         """
         task_descriptions = []
         for i, t in enumerate(tasks, 1):
@@ -204,16 +204,23 @@ class HarnessTrigger:
         tasks_text = "\n".join(task_descriptions)
 
         return (
-            f"You are Eddie-Nirmana executing an autonomous improvement cycle triggered by MetaLoop. "
-            f"Read ~/eddie-nirmana/PERSONA.md for your identity.\n\n"
-            f"The MetaLoop identified the following improvement tasks (all GREEN authority - auto-execute):\n\n"
+            f"You are executing an autonomous improvement cycle triggered by MetaLoop.\n\n"
+            f"The MetaLoop identified the following improvement tasks "
+            f"(all GREEN authority - auto-execute):\n\n"
             f"{tasks_text}\n\n"
-            f"Follow the normal harness-loop Phase 1 process:\n"
-            f"1. Analyze the tasks and clarify requirements (as Nirmana, you confirm them yourself)\n"
-            f"2. Design the implementation approach\n"
-            f"3. Decompose into a task DAG\n"
-            f"4. Present the final plan summary\n"
-            f"5. Output [HARNESS_EXEC_READY] at the end\n\n"
-            f"Since Eddie is /away, you ARE the reviewer. Confirm the plan as Nirmana, "
-            f"then output [HARNESS_EXEC_READY]. Eddie-Nirmana will handle /confirm automatically."
+            f"## Step 1: Nirmana Review (REQUIRED)\n"
+            f"Before executing, spawn an Eddie-Nirmana subagent to review this plan.\n"
+            f"The subagent should:\n"
+            f"- Read ~/eddie-nirmana/PERSONA.md for identity and decision authority\n"
+            f"- Validate each task is within GREEN/YELLOW authority bounds\n"
+            f"- Check alignment with Eddie's priorities (read ~/eddie-nirmana/state/night-runner-projects.md)\n"
+            f"- Clarify any ambiguous requirements and refine task descriptions\n"
+            f"- Return: approved (with any refinements) or rejected (with reason)\n\n"
+            f"## Step 2: Execute (only if Nirmana approved)\n"
+            f"If the Nirmana subagent approves the plan:\n"
+            f"- Initialize .harness/ with the refined task DAG\n"
+            f"- Enter the Execute Loop directly (skip [HARNESS_EXEC_READY], no /confirm needed)\n"
+            f"- Commit and push results when done\n"
+            f"- Output [HARNESS_COMPLETE] when finished\n\n"
+            f"If Nirmana rejects, log the rejection reason and stop. Do NOT execute rejected tasks."
         )
