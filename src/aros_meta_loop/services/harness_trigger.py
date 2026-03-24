@@ -122,6 +122,12 @@ class HarnessTrigger:
         """Check if the last dispatched background task completed and produced results.
 
         Non-blocking: just checks current status, doesn't wait.
+        Uses a multi-layered approach since the gateway's in-memory bg_task
+        state can be lost on restart or after cleanup:
+          1. Check background-status API (uses in-memory _bg_tasks)
+          2. If idle, fall back to checking gateway sessions for busy bg- sessions
+          3. If idle bg- session exists, check harness-status for completion info
+
         Returns: {status, completed, has_commits, details}
         """
         try:
@@ -136,30 +142,142 @@ class HarnessTrigger:
                 bg_status = resp.json()
                 status = bg_status.get("status", "unknown")
 
-                result = {
-                    "status": status,
-                    "completed": status == "completed",
-                    "elapsed_seconds": bg_status.get("elapsed_seconds", 0),
-                    "details": "",
-                }
+                # If background-status returned a real status, use it directly
+                if status != "idle":
+                    return self._build_verification_result(status, bg_status)
 
-                if status == "completed":
-                    bg_result = bg_status.get("result", "")
-                    result["details"] = str(bg_result)[:200] if bg_result else "No output"
-                    result["has_commits"] = any(
-                        kw in str(bg_result).lower()
-                        for kw in ["commit", "push", "fixed", "merged", "close"]
-                    )
-                elif status == "running":
-                    result["details"] = f"Still running ({bg_status.get('elapsed_seconds', 0):.0f}s)"
-                elif status == "idle":
-                    result["details"] = "No active task"
-                else:
-                    result["details"] = f"Status: {status}"
-
-                return result
+                # background-status returned "idle" — this can happen when:
+                # - Gateway restarted (in-memory _bg_tasks lost)
+                # - Cleanup removed the bg_task entry
+                # - No task was ever dispatched
+                # Fall back to checking gateway sessions directly
+                return self._verify_via_sessions(client)
         except Exception as e:
             return {"status": "error", "completed": False, "details": str(e)}
+
+    def _build_verification_result(self, status: str, bg_status: dict) -> dict:
+        """Build a verification result dict from background-status response."""
+        result = {
+            "status": status,
+            "completed": status == "completed",
+            "elapsed_seconds": bg_status.get("elapsed_seconds", 0),
+            "details": "",
+        }
+
+        if status == "completed":
+            bg_result = bg_status.get("result", "")
+            result["details"] = str(bg_result)[:200] if bg_result else "No output"
+            result["has_commits"] = any(
+                kw in str(bg_result).lower()
+                for kw in ["commit", "push", "fixed", "merged", "close"]
+            )
+        elif status == "running":
+            result["details"] = f"Still running ({bg_status.get('elapsed_seconds', 0):.0f}s)"
+        elif status == "idle":
+            result["details"] = "No active task"
+        else:
+            result["details"] = f"Status: {status}"
+
+        return result
+
+    def _verify_via_sessions(self, client: httpx.Client) -> dict:
+        """Fallback verification using gateway sessions and harness-status.
+
+        Called when background-status returns "idle" (bg_task entry missing).
+        Checks if a bg- session for this chat_id exists and whether it's busy.
+        """
+        bg_prefix = f"bg-{self.chat_id}-"
+
+        try:
+            resp = client.get(f"{self.gateway_url}/api/gateway/sessions")
+            if resp.status_code != 200:
+                return {"status": "idle", "completed": False, "details": "No active task"}
+
+            sessions = resp.json()
+            bg_sessions = [
+                s for s in sessions
+                if s.get("chat_id", "").startswith(bg_prefix)
+            ]
+
+            if not bg_sessions:
+                return {"status": "idle", "completed": False, "details": "No active task"}
+
+            # Check if any bg session is still busy (task running)
+            for s in bg_sessions:
+                if s.get("busy", False):
+                    elapsed = s.get("busy_seconds", 0)
+                    logger.info(
+                        f"verify_last_dispatch: bg session {s['chat_id']} is busy "
+                        f"(detected via sessions fallback, {elapsed:.0f}s)"
+                    )
+                    return {
+                        "status": "running",
+                        "completed": False,
+                        "elapsed_seconds": elapsed,
+                        "details": f"Still running ({elapsed:.0f}s) [session: {s['chat_id']}]",
+                    }
+
+            # bg session exists but not busy — check harness-status for completion
+            return self._verify_via_harness_status(client)
+        except Exception as e:
+            logger.debug(f"Session fallback check failed: {e}")
+            return {"status": "idle", "completed": False, "details": "No active task"}
+
+    def _verify_via_harness_status(self, client: httpx.Client) -> dict:
+        """Check harness-status to determine if the last dispatch completed.
+
+        Called when a bg- session exists but is not busy and bg_task entry is gone.
+        """
+        try:
+            resp = client.get(
+                f"{self.gateway_url}/api/gateway/harness-status/{self.chat_id}",
+                params={"bot_id": "mini_claude_bot"},
+            )
+            if resp.status_code != 200:
+                return {"status": "idle", "completed": False, "details": "No active task"}
+
+            data = resp.json()
+            jobs = data.get("jobs", [])
+            if not jobs:
+                return {"status": "idle", "completed": False, "details": "No active task"}
+
+            latest = jobs[0]
+            harness = latest.get("harness") or {}
+            phase = harness.get("current_phase", "")
+            done = harness.get("done", 0)
+            total = harness.get("total", 0)
+            project = harness.get("project_name", "unknown")
+
+            if phase == "complete" or (total > 0 and done >= total):
+                logger.info(
+                    f"verify_last_dispatch: harness '{project}' complete "
+                    f"({done}/{total}) [detected via harness-status fallback]"
+                )
+                return {
+                    "status": "completed",
+                    "completed": True,
+                    "elapsed_seconds": 0,
+                    "details": f"Harness '{project}' complete ({done}/{total} tasks)",
+                    "has_commits": True,  # Assume commits if harness completed
+                }
+
+            if total > 0 and done < total:
+                # Harness has remaining work but no active session — likely stuck
+                logger.info(
+                    f"verify_last_dispatch: harness '{project}' incomplete "
+                    f"({done}/{total}) but no active session [harness-status fallback]"
+                )
+                return {
+                    "status": "stalled",
+                    "completed": False,
+                    "elapsed_seconds": 0,
+                    "details": f"Harness '{project}' stalled ({done}/{total} tasks done)",
+                }
+
+            return {"status": "idle", "completed": False, "details": "No active task"}
+        except Exception as e:
+            logger.debug(f"Harness-status fallback check failed: {e}")
+            return {"status": "idle", "completed": False, "details": "No active task"}
 
     def check_and_resume_stuck(self, stale_minutes: int = 30) -> dict | None:
         """Check if a harness-loop is stuck and resume it.

@@ -105,6 +105,7 @@ class TaskPlanner:
         }
 
         tasks: list[PlannedTask] = []
+        cycle_titles: set[str] = set()  # Track titles added in THIS cycle (for intra-cycle dedup)
 
         for goal in below_threshold:
             if len(tasks) >= MAX_TASKS_PER_CYCLE:
@@ -115,8 +116,15 @@ class TaskPlanner:
                 if t.source == "github_issue" and t.backlog_item:
                     # For GitHub issues: check if still open instead of time-based dedup
                     if self._is_issue_still_open(t.backlog_item):
-                        tasks.append(t)
-                        recent_titles.add(t.title)
+                        if t.title in cycle_titles:
+                            # Same issue from a different goal in THIS cycle — merge goal_source
+                            for existing in tasks:
+                                if existing.title == t.title and t.goal_source not in existing.goal_source:
+                                    existing.goal_source += f",{t.goal_source}"
+                                    break
+                        else:
+                            tasks.append(t)
+                            cycle_titles.add(t.title)
                     # If closed, skip silently
                 elif t.title not in recent_titles:
                     # For non-GitHub tasks: time-based dedup
