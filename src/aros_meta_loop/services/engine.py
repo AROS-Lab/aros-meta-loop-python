@@ -331,6 +331,11 @@ class MetaLoopEngine:
         self._cycle_log["requery_count"] = requery_count
 
         self._cycle_log["steps_completed"] = 3
+
+        # Always persist L2 scores to evolution log (even if NO_ACTION / no policy changes)
+        if not self._dry_run:
+            self._persist_scores(perceive_data)
+
         if self._phase_gate("critique"):
             return self._finalize_cycle("aborted")
         if self._should_stop_after(3):
@@ -701,6 +706,21 @@ class MetaLoopEngine:
             "source": "engine_alert",
             "priority": "urgent",
             "payload": {"action": critic_output.action.value, "reason": critic_output.reason},
+        })
+
+    def _persist_scores(self, perceive_data: dict) -> None:
+        """Persist L2 scores snapshot to evolution log unconditionally.
+
+        Called after CRITIQUE completes so that scores are recorded every cycle,
+        even when CRITIQUE returns NO_ACTION and no policy changes are made.
+        """
+        l2 = perceive_data.get("l2_scores", {})
+        self.state.append_evolution({
+            "type": "scores_snapshot",
+            "cycle_num": self._cycle_log.get("cycle_num"),
+            "trigger": self._cycle_log.get("trigger"),
+            "action": self._cycle_log.get("critique_output", {}).get("action", "none"),
+            "l2_scores": l2,
         })
 
     def _persist(self, policy_changes: list[PolicyChange], identity_verdict: str) -> None:

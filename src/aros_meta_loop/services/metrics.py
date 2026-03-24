@@ -1,7 +1,7 @@
 """L1 Metrics Collector — queries meta_events for rollup metrics."""
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aros_meta_loop.db.engine import get_db
 
@@ -26,7 +26,6 @@ class L1Collector:
         """
         if since is None:
             # Default to last 24 hours
-            from datetime import timedelta
             since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
         db = get_db()
@@ -86,6 +85,15 @@ class L1Collector:
         total_output = sum(d.get("tokens_out", 0) for d in tool_calls)
         cost_usd = (total_input * 3 + total_output * 15) / 1_000_000
 
+        # Query 7-day task count for G5 (ambitious) scoring
+        since_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        task_count_7d = db.execute(
+            "SELECT COUNT(*) as cnt FROM meta_events "
+            "WHERE bot_id = ? AND created_at >= ? "
+            "AND event_type IN ('task_complete', 'task_failed')",
+            (bot_id, since_7d)
+        ).fetchone()["cnt"]
+
         return {
             "tokens_consumed": total_tokens,
             "tokens_per_task": round(tokens_per_task, 1),
@@ -98,6 +106,7 @@ class L1Collector:
             "cost_usd": round(cost_usd, 4),
             "event_count": len(events),
             "task_count": len(tasks),
+            "task_count_7d": task_count_7d,
         }
 
 
@@ -141,9 +150,10 @@ class L2Evaluator:
         tool_success = l1_metrics.get("tool_call_success_rate", 1.0)
         g4 = tool_success
 
-        # G5: Ambitious — average complexity (not directly in L1, use task_count as proxy)
+        # G5: Ambitious — use 7-day task count for wider window
         # Higher task throughput with acceptable quality = more ambitious
-        g5 = min(1.0, task_count / 10.0) if task_count > 0 else 0.0
+        task_count_7d = max(l1_metrics.get("task_count_7d", task_count), 0)
+        g5 = min(1.0, task_count_7d / 10.0) if task_count_7d > 0 else 0.0
 
         # G6: Self-Know — calibration accuracy (proxy: success rate stability)
         g6 = l1_metrics.get("tool_call_success_rate", 0.5)

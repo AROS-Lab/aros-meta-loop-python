@@ -107,9 +107,19 @@ async def get_status():
         evaluator = L2Evaluator(state_manager=engine.state)
         l2 = evaluator.evaluate(l1)
         status["meta_goal_scores"] = l2
+        status["scores_source"] = "live"
+        status["l1_metrics"] = {
+            "tokens_consumed": l1.get("tokens_consumed"),
+            "tool_call_count": l1.get("tool_call_count"),
+            "tool_call_success_rate": l1.get("tool_call_success_rate"),
+            "error_count_by_type": l1.get("error_count_by_type"),
+            "cost_usd": l1.get("cost_usd"),
+        }
     except Exception as e:
+        logger.warning("L2 score computation failed: %s", e, exc_info=True)
         status["meta_goal_scores"] = None
         status["meta_goal_error"] = str(e)
+        status["scores_source"] = "error"
 
     return status
 
