@@ -340,7 +340,7 @@ class HarnessTrigger:
         # Step 2 & 3: Check for existing unfinished harness
         harness_state = self.get_harness_state()
         if harness_state:
-            harness_info = harness_state.get("harness", {})
+            harness_info = harness_state.get("harness") or {}
             phase = harness_info.get("current_phase", "")
             done = harness_info.get("done", 0)
             total = harness_info.get("total", 0)

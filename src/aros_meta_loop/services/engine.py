@@ -435,22 +435,39 @@ class MetaLoopEngine:
     def _sync_nirmana_state(self) -> None:
         """Sync nirmana mode with mini-claude-bot gateway.
 
-        If the gateway says nirmana is active but our cadence is 'balanced',
-        the fire-and-forget bridge call was lost — auto-correct to aggressive.
+        Checks ALL gateway sessions for nirmana activation (not just one chat).
+        If any session has nirmana_mode=True, switch to aggressive cadence.
+        If none do and we're in aggressive mode, revert to balanced.
         """
         try:
             import httpx
-            # Query the dedicated nirmana state endpoint for Night Runner chat
-            night_runner_chat = "-1003891385836"
             with httpx.Client(timeout=3.0) as client:
+                # Check all sessions for any nirmana activation
                 resp = client.get(
-                    f"http://localhost:8000/api/gateway/nirmana/{night_runner_chat}",
+                    "http://localhost:8000/api/gateway/sessions",
                     params={"bot_id": "mini_claude_bot"},
                 )
                 if resp.status_code != 200:
                     return
-                data = resp.json()
-                gateway_nirmana = data.get("nirmana_mode", False)
+                sessions = resp.json()
+                if not isinstance(sessions, list):
+                    return
+
+                # Check each session's nirmana state
+                gateway_nirmana = False
+                for s in sessions:
+                    chat_id = s.get("chat_id", "")
+                    if chat_id.startswith("bg-") or chat_id.startswith("fg-"):
+                        continue  # Skip background/foreground worker sessions
+                    nirmana_resp = client.get(
+                        f"http://localhost:8000/api/gateway/nirmana/{chat_id}",
+                        params={"bot_id": "mini_claude_bot"},
+                    )
+                    if nirmana_resp.status_code == 200:
+                        data = nirmana_resp.json()
+                        if data.get("nirmana_mode", False):
+                            gateway_nirmana = True
+                            break
 
             cadence = self.state.read_cadence()
             local_mode = cadence.get("mode", "balanced")
