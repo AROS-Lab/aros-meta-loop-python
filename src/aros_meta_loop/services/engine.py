@@ -647,9 +647,10 @@ class MetaLoopEngine:
 
         if drift_signals:
             drift_score = drift_signals[0].get("payload", {}).get("drift_score", 0)
-            # Channel E: drift threshold 0.3 — triggers restart from PERCEIVE
+            # Channel E: drift threshold — triggers restart from PERCEIVE
+            # Default 0.5 allows up to 3/6 goals below threshold before rejecting
             policy = self.state.read_policy()
-            drift_threshold = policy.get("meta_loop", {}).get("drift_threshold", 0.3)
+            drift_threshold = policy.get("meta_loop", {}).get("drift_threshold", 0.5)
             if drift_score > drift_threshold:
                 self._staged_policy = None  # Discard changes
                 return "rejected_high_drift"
