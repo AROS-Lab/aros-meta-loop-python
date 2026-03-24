@@ -169,3 +169,65 @@ class TestAPIIntegration:
         """Signal with missing required fields should fail."""
         resp = api_integration_env["client"].post("/api/meta-loop/signal", json={})
         assert resp.status_code == 422  # Pydantic validation error
+
+
+class TestAdhocTrigger:
+    """Tests for POST /api/meta-loop/trigger/adhoc."""
+
+    def test_adhoc_returns_full_result_inline(self, api_integration_env):
+        """Adhoc trigger returns complete cycle data synchronously."""
+        resp = api_integration_env["client"].post(
+            "/api/meta-loop/trigger/adhoc", json={}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] in ("completed", "completed_partial", "aborted")
+        assert "perceive_data" in data
+        assert data["trigger"] == "adhoc"
+
+    def test_adhoc_dry_run_skips_persist(self, api_integration_env):
+        """Dry run executes all steps but skips PERSIST."""
+        env = api_integration_env
+        resp = env["client"].post(
+            "/api/meta-loop/trigger/adhoc", json={"dry_run": True}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("dry_run") is True
+        assert data.get("persist_skipped") == "dry_run"
+        assert data["steps_completed"] >= 6
+
+    def test_adhoc_stop_after_step(self, api_integration_env):
+        """stop_after_step=1 runs only PERCEIVE."""
+        resp = api_integration_env["client"].post(
+            "/api/meta-loop/trigger/adhoc",
+            json={"stop_after_step": 1},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "completed_partial"
+        assert data["steps_completed"] == 1
+        assert "perceive_data" in data
+
+    def test_adhoc_stop_after_critique(self, api_integration_env):
+        """stop_after_step=3 runs PERCEIVE → SELF-MODEL → CRITIQUE."""
+        resp = api_integration_env["client"].post(
+            "/api/meta-loop/trigger/adhoc",
+            json={"stop_after_step": 3},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "completed_partial"
+        assert data["steps_completed"] == 3
+        assert "critique_output" in data
+
+    def test_adhoc_skips_cadence_by_default(self, api_integration_env):
+        """Adhoc trigger bypasses cadence limits by default."""
+        env = api_integration_env
+        # Run several times rapidly — should not get throttled
+        for _ in range(3):
+            resp = env["client"].post(
+                "/api/meta-loop/trigger/adhoc", json={"dry_run": True}
+            )
+            assert resp.status_code == 200
+            assert resp.json()["status"] != "throttled"

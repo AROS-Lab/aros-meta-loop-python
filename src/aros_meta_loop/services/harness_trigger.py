@@ -161,6 +161,48 @@ class HarnessTrigger:
         except Exception as e:
             return {"status": "error", "completed": False, "details": str(e)}
 
+    def check_and_resume_stuck(self, stale_minutes: int = 30) -> dict | None:
+        """Check if a harness-loop is stuck and resume it.
+
+        Returns resume result if a stuck harness was found, None otherwise.
+        A harness is 'stuck' if it has pending/in_progress tasks but the
+        background session is not busy (i.e., processing stopped).
+        """
+        harness_state = self.get_harness_state()
+        if not harness_state:
+            return None
+
+        harness_info = harness_state.get("harness") or {}
+        phase = harness_info.get("current_phase", "")
+        pending = harness_info.get("pending", 0)
+        in_progress = harness_info.get("in_progress", 0)
+        done = harness_info.get("done", 0)
+        total = harness_info.get("total", 0)
+        project = harness_info.get("project_name", "unknown")
+
+        # Not stuck if: complete, or no tasks, or all done
+        if phase == "complete" or total == 0 or done == total:
+            return None
+
+        # Has remaining work — check if background session is still running
+        if self.is_harness_running():
+            return None  # Still active, not stuck
+
+        # Has remaining work but no active session → stuck
+        if pending > 0 or in_progress > 0:
+            logger.warning(
+                f"Harness '{project}' appears stuck: "
+                f"{done}/{total} done, {pending} pending, {in_progress} in_progress, "
+                f"but no active background session. Resuming."
+            )
+            result = self._resume_harness()
+            result["reason"] = "auto_resume_stuck"
+            result["project"] = project
+            result["progress"] = f"{done}/{total}"
+            return result
+
+        return None
+
     def trigger_harness_loop(self, tasks: list[PlannedTask]) -> dict:
         """Trigger a harness-loop with the given tasks.
 
@@ -274,5 +316,25 @@ class HarnessTrigger:
             f"- Enter the Execute Loop directly (skip [HARNESS_EXEC_READY], no /confirm needed)\n"
             f"- Commit and push results when done\n"
             f"- Output [HARNESS_COMPLETE] when finished\n\n"
-            f"If Nirmana rejects, log the rejection reason and stop. Do NOT execute rejected tasks."
+            f"If Nirmana rejects, log the rejection reason and stop. Do NOT execute rejected tasks.\n\n"
+            f"## Nirmana Autonomous Handling\n"
+            f"You are running as Eddie-Nirmana (autonomous mode). Handle these scenarios:\n\n"
+            f"### Clarification Requests\n"
+            f"If the harness-loop asks clarifying questions about requirements:\n"
+            f"- Read ~/eddie-nirmana/PERSONA.md for Eddie's decision-making style\n"
+            f"- Read ~/eddie-nirmana/state/night-runner-projects.md for project context\n"
+            f"- Answer based on Eddie's priorities: reliability > features, simplicity > complexity\n"
+            f"- For GREEN tasks (bug fixes, tests): bias toward 'fix it the simplest way'\n"
+            f"- For ambiguous scope: choose the minimal viable scope\n"
+            f"- Never block on clarification — make a reasonable decision and proceed\n\n"
+            f"### Plan Confirmation\n"
+            f"If the harness-loop presents a plan and asks for /confirm:\n"
+            f"- Review the plan for safety (no destructive operations, no force-pushes)\n"
+            f"- If plan looks reasonable: send /confirm immediately\n"
+            f"- If plan has RED flags (deleting data, modifying auth, changing APIs): reject and log\n\n"
+            f"### Stuck/Stalled Detection\n"
+            f"If the harness-loop appears stuck or asks for /resume:\n"
+            f"- Send /resume to continue execution\n"
+            f"- If a task is blocked, skip it and proceed with remaining tasks\n"
+            f"- If all tasks are blocked, output [HARNESS_BLOCKED:all:need_human_input]"
         )

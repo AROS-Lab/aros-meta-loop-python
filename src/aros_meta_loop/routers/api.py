@@ -28,6 +28,12 @@ class TriggerRequest(BaseModel):
     trigger: str = "manual"
     bot_id: str = "default"
 
+class AdhocTriggerRequest(BaseModel):
+    dry_run: bool = False
+    skip_cadence: bool = True
+    stop_after_step: int | None = None
+    bot_id: str = "default"
+
 class TriggerResponse(BaseModel):
     status: str
     message: str
@@ -60,6 +66,31 @@ async def trigger_cycle(req: TriggerRequest, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run)
     return TriggerResponse(status="started", message=f"Cycle triggered: {req.trigger}")
+
+
+@router.post("/trigger/adhoc")
+async def trigger_adhoc(req: AdhocTriggerRequest):
+    """Run a cycle synchronously with fine-tuning controls for debugging.
+
+    Unlike /trigger (background), this returns the full cycle result inline.
+
+    Options:
+        dry_run: Run all steps but skip PERSIST and PLAN (no state changes).
+        skip_cadence: Bypass rate limits (default True for adhoc).
+        stop_after_step: Stop after step N (1=PERCEIVE, 2=SELF-MODEL, 3=CRITIQUE,
+                         4=POLICY_REVISION, 5=IDENTITY, 6=PERSIST, 7=PLAN).
+    """
+    engine = get_engine()
+    if engine.is_running:
+        return {"status": "skipped", "reason": "cycle already running"}
+
+    result = await engine.run_cycle(
+        "adhoc",
+        dry_run=req.dry_run,
+        skip_cadence=req.skip_cadence,
+        stop_after_step=req.stop_after_step,
+    )
+    return result
 
 
 @router.get("/status")

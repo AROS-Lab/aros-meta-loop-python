@@ -288,3 +288,50 @@ class TestSmartDedup:
             below_threshold=["G1_truthful"],
         )
         assert len(tasks2) == 0
+
+
+class TestDispatchStatusTracking:
+    """Tests for mark_dispatched / mark_dispatch_failed dedup behavior."""
+
+    def setup_method(self):
+        TaskPlanner._recent_dispatches = []
+
+    def test_mark_dispatched_prevents_regen(self, planner_no_backlog):
+        """Tasks marked as dispatched are deduped for 24h."""
+        tasks1 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks1) >= 1
+
+        # Mark as dispatched
+        TaskPlanner.mark_dispatched([t.title for t in tasks1])
+
+        # Second call — dispatched tasks still deduped
+        tasks2 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks2) == 0
+
+    def test_mark_failed_allows_retry(self, planner_no_backlog):
+        """Tasks marked as failed dispatch are retried on next cycle."""
+        tasks1 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks1) >= 1
+
+        # Mark as failed — should allow retry
+        TaskPlanner.mark_dispatch_failed([t.title for t in tasks1])
+
+        # Second call — failed tasks are regenerated
+        tasks2 = planner_no_backlog.generate_tasks(
+            scores={"G1_truthful": 0.2},
+            below_threshold=["G1_truthful"],
+        )
+        assert len(tasks2) >= 1
+
+    def test_dedup_window_extended_to_24h(self):
+        """Dedup window should be 24 hours (86400 seconds)."""
+        assert TaskPlanner._DEDUP_WINDOW_SECONDS == 86400

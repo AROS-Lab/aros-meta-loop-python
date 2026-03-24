@@ -55,9 +55,27 @@ class PlannedTask:
 class TaskPlanner:
     """Generates improvement tasks from meta-goal analysis, GitHub issues, and chat history."""
 
-    # Track recently dispatched tasks with timestamps for time-based expiry
-    _recent_dispatches: list[tuple[str, float]] = []  # (title, timestamp)
-    _DEDUP_WINDOW_SECONDS = 3600  # 1 hour - after this, same task can be re-generated
+    # Track recently dispatched tasks with timestamps and status for smart expiry
+    _recent_dispatches: list[tuple[str, float, str]] = []  # (title, timestamp, status)
+    _DEDUP_WINDOW_SECONDS = 86400  # 24 hours - prevents re-generating the same task within a day
+
+    @classmethod
+    def mark_dispatched(cls, titles: list[str]) -> None:
+        """Mark tasks as successfully dispatched (prevents re-generation for 24h)."""
+        titles_set = set(titles)
+        cls._recent_dispatches = [
+            (t, ts, "dispatched" if t in titles_set else status)
+            for t, ts, status in cls._recent_dispatches
+        ]
+
+    @classmethod
+    def mark_dispatch_failed(cls, titles: list[str]) -> None:
+        """Mark tasks as failed dispatch (allows re-generation on next cycle)."""
+        titles_set = set(titles)
+        cls._recent_dispatches = [
+            (t, ts, "failed" if t in titles_set else status)
+            for t, ts, status in cls._recent_dispatches
+        ]
 
     def __init__(self, backlog_path: Path = NIGHT_RUNNER_PROJECTS):
         self.backlog_path = backlog_path
@@ -77,10 +95,14 @@ class TaskPlanner:
         import time
         now = time.time()
         TaskPlanner._recent_dispatches = [
-            (title, ts) for title, ts in TaskPlanner._recent_dispatches
+            (title, ts, status) for title, ts, status in TaskPlanner._recent_dispatches
             if now - ts < TaskPlanner._DEDUP_WINDOW_SECONDS
         ]
-        recent_titles = {title for title, _ in TaskPlanner._recent_dispatches}
+        # Dedup generated and dispatched tasks. Only "failed" status allows retry.
+        recent_titles = {
+            title for title, _, status in TaskPlanner._recent_dispatches
+            if status in ("generated", "dispatched")
+        }
 
         tasks: list[PlannedTask] = []
 
@@ -101,9 +123,9 @@ class TaskPlanner:
                     tasks.append(t)
                     recent_titles.add(t.title)
 
-        # Record dispatched titles with timestamp
+        # Record generated titles with timestamp (status updated by caller after dispatch)
         for t in tasks:
-            TaskPlanner._recent_dispatches.append((t.title, now))
+            TaskPlanner._recent_dispatches.append((t.title, now, "generated"))
 
         return tasks[:MAX_TASKS_PER_CYCLE]
 

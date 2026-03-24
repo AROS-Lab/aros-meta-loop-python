@@ -183,6 +183,9 @@ class MetaLoopEngine:
         self._cycle_log: dict = {}
         # Channel G: Last persist confirmation for next perceive
         self._last_persist_confirmation: dict | None = None
+        # Adhoc trigger controls
+        self._dry_run = False
+        self._stop_after_step: int | None = None
         # Nirmana autonomous mode
         self._nirmana_mode = False
         self._nirmana_briefing: list[dict] = []
@@ -204,28 +207,40 @@ class MetaLoopEngine:
         self._abort_reason = reason
         logger.warning(f"Abort requested: {reason}")
 
-    async def run_cycle(self, trigger: str = "scheduled") -> dict:
+    async def run_cycle(self, trigger: str = "scheduled", *,
+                        dry_run: bool = False,
+                        skip_cadence: bool = False,
+                        stop_after_step: int | None = None) -> dict:
         """
         Execute the full 6-step cycle.
         Returns cycle result dict with step outcomes.
+
+        Args:
+            trigger: Label for this trigger (e.g. "manual", "adhoc", "scheduled").
+            dry_run: If True, run all steps but skip PERSIST (no state changes).
+            skip_cadence: If True, bypass cadence rate limits.
+            stop_after_step: If set (1-7), stop after completing that step number.
         """
         if self._lock.locked():
             return {"status": "skipped", "reason": "cycle already running"}
 
         async with self._lock:
-            # Cadence limit check (legacy)
-            rejection = self._check_cadence_limits(trigger)
-            if rejection:
-                return {"status": "skipped", "reason": rejection}
+            if not skip_cadence:
+                # Cadence limit check (legacy)
+                rejection = self._check_cadence_limits(trigger)
+                if rejection:
+                    return {"status": "skipped", "reason": rejection}
 
-            # CadenceController check
-            can_run, reason = self.cadence.can_run_cycle()
-            if not can_run:
-                return {"status": "throttled", "reason": reason}
+                # CadenceController check
+                can_run, reason = self.cadence.can_run_cycle()
+                if not can_run:
+                    return {"status": "throttled", "reason": reason}
 
             self._running = True
             self._staged_policy = None
             self._staged_self_model = None
+            self._dry_run = dry_run
+            self._stop_after_step = stop_after_step
 
             cycle_num = self._get_next_cycle_num()
             started_at = datetime.now(timezone.utc).isoformat()
@@ -234,6 +249,8 @@ class MetaLoopEngine:
                 "trigger": trigger,
                 "started_at": started_at,
                 "steps_completed": 0,
+                "dry_run": dry_run,
+                "stop_after_step": stop_after_step,
             }
 
             # Read timeouts from cadence config
@@ -272,6 +289,10 @@ class MetaLoopEngine:
                 self._abort_flag = False
                 self._abort_reason = ""
 
+    def _should_stop_after(self, step: int) -> bool:
+        """Check if adhoc trigger requested stopping after this step."""
+        return self._stop_after_step is not None and step >= self._stop_after_step
+
     async def _run_cycle_steps(self, trigger: str, step_timeout: float) -> dict:
         """Inner cycle steps, separated for timeout wrapping."""
         # Step 1: PERCEIVE
@@ -280,12 +301,16 @@ class MetaLoopEngine:
         self._cycle_log["steps_completed"] = 1
         if self._phase_gate("perceive"):
             return self._finalize_cycle("aborted")
+        if self._should_stop_after(1):
+            return self._finalize_cycle("completed_partial")
 
         # Step 2: SELF-MODEL UPDATE
         self._self_model_update(perceive_data)
         self._cycle_log["steps_completed"] = 2
         if self._phase_gate("self_model_update"):
             return self._finalize_cycle("aborted")
+        if self._should_stop_after(2):
+            return self._finalize_cycle("completed_partial")
 
         # Step 3: CRITIQUE
         critic_output = self._critique(perceive_data)
@@ -308,6 +333,8 @@ class MetaLoopEngine:
         self._cycle_log["steps_completed"] = 3
         if self._phase_gate("critique"):
             return self._finalize_cycle("aborted")
+        if self._should_stop_after(3):
+            return self._finalize_cycle("completed_partial")
 
         # Step 4: POLICY REVISION
         policy_changes = self._policy_revision(critic_output, perceive_data)
@@ -335,6 +362,8 @@ class MetaLoopEngine:
         self._cycle_log["steps_completed"] = 4
         if self._phase_gate("policy_revision"):
             return self._finalize_cycle("aborted")
+        if self._should_stop_after(4):
+            return self._finalize_cycle("completed_partial")
 
         # Step 5: IDENTITY CHECK
         identity_verdict = self._identity_check(policy_changes, perceive_data)
@@ -373,21 +402,99 @@ class MetaLoopEngine:
         self._cycle_log["steps_completed"] = 5
         if self._phase_gate("identity_check"):
             return self._finalize_cycle("aborted")
+        if self._should_stop_after(5):
+            return self._finalize_cycle("completed_partial")
 
         # Step 6: PERSIST
-        self._persist(policy_changes, identity_verdict)
+        if self._dry_run:
+            logger.info("Dry run — skipping PERSIST step (no state changes)")
+            self._cycle_log["persist_skipped"] = "dry_run"
+        else:
+            self._persist(policy_changes, identity_verdict)
         self._cycle_log["steps_completed"] = 6
+        if self._should_stop_after(6):
+            return self._finalize_cycle("completed_partial")
 
         # Step 7: PLAN (autonomous task generation)
-        planned_tasks = self._plan_tasks(perceive_data)
-        if planned_tasks:
-            self._cycle_log["planned_tasks"] = planned_tasks
-            self._cycle_log["steps_completed"] = 7
+        if self._dry_run:
+            logger.info("Dry run — skipping PLAN step (no task dispatch)")
+            self._cycle_log["plan_skipped"] = "dry_run"
+        else:
+            planned_tasks = self._plan_tasks(perceive_data)
+            if planned_tasks:
+                self._cycle_log["planned_tasks"] = planned_tasks
+                self._cycle_log["steps_completed"] = 7
 
         return self._finalize_cycle("completed")
 
+    def _sync_nirmana_state(self) -> None:
+        """Sync nirmana mode with mini-claude-bot gateway.
+
+        If the gateway says nirmana is active but our cadence is 'balanced',
+        the fire-and-forget bridge call was lost — auto-correct to aggressive.
+        """
+        try:
+            import httpx
+            # Query the dedicated nirmana state endpoint for Night Runner chat
+            night_runner_chat = "-1003891385836"
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.get(
+                    f"http://localhost:8000/api/gateway/nirmana/{night_runner_chat}",
+                    params={"bot_id": "mini_claude_bot"},
+                )
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+                gateway_nirmana = data.get("nirmana_mode", False)
+
+            cadence = self.state.read_cadence()
+            local_mode = cadence.get("mode", "balanced")
+
+            if gateway_nirmana and local_mode != "aggressive":
+                logger.warning(
+                    "Nirmana state mismatch: gateway says active, "
+                    f"local mode is '{local_mode}' — correcting to aggressive"
+                )
+                cadence["mode"] = "aggressive"
+                import tomllib
+                config_path = self.state.state_dir / "meta-cognition.toml"
+                if config_path.exists():
+                    with open(config_path, "rb") as f:
+                        full_config = tomllib.load(f)
+                else:
+                    full_config = {}
+                full_config["cadence"] = cadence
+                self.state.write_snapshot("meta-cognition.toml", full_config)
+
+                from aros_meta_loop.services.scheduler import update_schedule
+                update_schedule("aggressive")
+                self._nirmana_mode = True
+
+            elif not gateway_nirmana and local_mode == "aggressive" and self._nirmana_mode:
+                logger.info("Nirmana deactivated at gateway — reverting to balanced")
+                cadence["mode"] = "balanced"
+                import tomllib
+                config_path = self.state.state_dir / "meta-cognition.toml"
+                if config_path.exists():
+                    with open(config_path, "rb") as f:
+                        full_config = tomllib.load(f)
+                else:
+                    full_config = {}
+                full_config["cadence"] = cadence
+                self.state.write_snapshot("meta-cognition.toml", full_config)
+
+                from aros_meta_loop.services.scheduler import update_schedule
+                update_schedule("balanced")
+                self._nirmana_mode = False
+
+        except Exception as e:
+            logger.debug(f"Nirmana state sync failed (non-fatal): {e}")
+
     def _perceive(self) -> dict:
         """Step 1: Gather L1/L2/L3 metrics and drain signal queue."""
+        # Sync nirmana state with gateway before collecting metrics
+        self._sync_nirmana_state()
+
         l1 = self.collector.collect(self.bot_id)
         l2 = self.evaluator.evaluate(l1)
         self_model = self.state.read_self_model()
@@ -693,6 +800,20 @@ class MetaLoopEngine:
         # Verify previous dispatch before generating new tasks
         from aros_meta_loop.services.harness_trigger import HarnessTrigger
         trigger = HarnessTrigger()
+
+        # Auto-resume stuck harness loops
+        resume_result = trigger.check_and_resume_stuck()
+        if resume_result:
+            logger.info(f"Auto-resumed stuck harness: {resume_result}")
+            self.state.append_evolution({
+                "type": "harness_auto_resume",
+                "cycle_num": self._cycle_log.get("cycle_num"),
+                "result": resume_result,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            # Don't generate new tasks — let the resumed harness finish first
+            return []
+
         verification = trigger.verify_last_dispatch()
         if verification.get("status") == "running":
             logger.info(
@@ -754,17 +875,37 @@ class MetaLoopEngine:
             n_yellow += 1
             logger.info(f"YELLOW task queued for approval: {t.title}")
 
-        n_green = len(green_tasks)
-        n_skipped = len(tasks) - n_green - n_yellow
+        n_skipped = len(tasks) - len(green_tasks) - n_yellow
+
+        # Actually dispatch GREEN tasks via HarnessTrigger
+        trigger_result = {"status": "skipped", "reason": "no GREEN tasks"}
+        if green_tasks:
+            trigger_result = trigger.trigger_harness_loop(green_tasks)
+            if trigger_result.get("status") == "dispatched":
+                logger.info(f"GREEN tasks dispatched: {trigger_result}")
+                # Mark as dispatched so dedup prevents re-generation for 24h
+                TaskPlanner.mark_dispatched([t.title for t in green_tasks])
+            elif trigger_result.get("status") == "error":
+                logger.error(f"GREEN task dispatch FAILED: {trigger_result}")
+                # Mark as failed so dedup allows retry on next cycle
+                TaskPlanner.mark_dispatch_failed([t.title for t in green_tasks])
+            else:
+                logger.info(f"GREEN task dispatch result: {trigger_result}")
+
+        n_green_dispatched = (
+            len(green_tasks) if trigger_result.get("status") == "dispatched" else 0
+        )
 
         # Log task generation to evolution log
         self.state.log_task_generation(
             cycle_num=cycle_num or 0,
             tasks=task_dicts,
             trigger_results={
-                "green_dispatched": n_green,
+                "green_dispatched": n_green_dispatched,
+                "green_generated": len(green_tasks),
                 "yellow_queued": n_yellow,
                 "skipped": n_skipped,
+                "dispatch_result": trigger_result,
                 "verification": verification,
             },
         )

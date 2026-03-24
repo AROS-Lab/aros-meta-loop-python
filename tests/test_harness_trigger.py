@@ -382,3 +382,47 @@ class TestVerifyLastDispatch:
         assert result["status"] == "error"
         assert result["completed"] is False
         assert "Connection refused" in result["details"]
+
+
+class TestCheckAndResumeStuck:
+    """Tests for check_and_resume_stuck method."""
+
+    def test_no_harness_returns_none(self, trigger):
+        """No existing harness → returns None."""
+        with patch.object(trigger, "get_harness_state", return_value=None):
+            assert trigger.check_and_resume_stuck() is None
+
+    def test_complete_harness_returns_none(self, trigger):
+        """Completed harness → returns None."""
+        with patch.object(trigger, "get_harness_state", return_value={
+            "harness": {"current_phase": "complete", "pending": 0, "in_progress": 0, "done": 5, "total": 5}
+        }):
+            assert trigger.check_and_resume_stuck() is None
+
+    def test_running_harness_returns_none(self, trigger):
+        """Active (busy) harness → returns None (not stuck)."""
+        with patch.object(trigger, "get_harness_state", return_value={
+            "harness": {"current_phase": "engineering", "pending": 3, "in_progress": 1, "done": 2, "total": 6,
+                        "project_name": "test-proj"}
+        }), patch.object(trigger, "is_harness_running", return_value=True):
+            assert trigger.check_and_resume_stuck() is None
+
+    def test_stuck_harness_resumes(self, trigger):
+        """Harness with pending tasks but no active session → resume."""
+        with patch.object(trigger, "get_harness_state", return_value={
+            "harness": {"current_phase": "engineering", "pending": 3, "in_progress": 0, "done": 2, "total": 5,
+                        "project_name": "test-proj"}
+        }), patch.object(trigger, "is_harness_running", return_value=False), \
+             patch.object(trigger, "_resume_harness", return_value={"status": "resumed"}):
+            result = trigger.check_and_resume_stuck()
+            assert result is not None
+            assert result["status"] == "resumed"
+            assert result["reason"] == "auto_resume_stuck"
+            assert result["project"] == "test-proj"
+
+    def test_null_harness_info_returns_none(self, trigger):
+        """harness_state with null harness info → returns None."""
+        with patch.object(trigger, "get_harness_state", return_value={
+            "harness": None
+        }):
+            assert trigger.check_and_resume_stuck() is None
