@@ -106,4 +106,4 @@ Requires Python 3.12+.
 
 ## License
 
-Private — AROS-Lab
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
