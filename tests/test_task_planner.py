@@ -148,6 +148,52 @@ def test_reads_backlog_file(planner_with_backlog):
     assert "Add memory throttle module" in titles
 
 
+def test_quarantine_do_not_auto_dispatch_marker_skipped(tmp_path):
+    """Tasks with DO_NOT_AUTO_DISPATCH in the description are skipped (Nirmana quarantine)."""
+    backlog = tmp_path / "night-runner-projects.md"
+    backlog.write_text(
+        "# Night Runner Projects\n\n"
+        "## Task Backlog\n"
+        "| # | Task | Source | Priority |\n"
+        "|---|------|--------|----------|\n"
+        "| 1 | File provisional patent. `DO_NOT_AUTO_DISPATCH` — requires Eddie. | Eddie | MEDIUM-HIGH |\n"
+        "| 2 | Implement event bus for aros-kernel | planning | MEDIUM |\n"
+    )
+    planner = TaskPlanner(backlog_path=backlog)
+    planner._issues_cache = []
+    tasks = planner.generate_tasks(
+        scores={"G5_ambitious": 0.1}, below_threshold=["G5_ambitious"],
+    )
+    titles = [t.title for t in tasks if t.source == "backlog"]
+    assert not any("patent" in t.lower() for t in titles), \
+        f"Quarantined task leaked into dispatch: {titles}"
+    assert any("event bus" in t.lower() for t in titles), \
+        f"Non-quarantined task was wrongly filtered: {titles}"
+
+
+def test_quarantine_red_priority_skipped(tmp_path):
+    """Tasks with RED priority are skipped (Nirmana Eddie-only tasks)."""
+    backlog = tmp_path / "night-runner-projects.md"
+    backlog.write_text(
+        "# Night Runner Projects\n\n"
+        "## Task Backlog\n"
+        "| # | Task | Source | Priority |\n"
+        "|---|------|--------|----------|\n"
+        "| 1 | Pay the USPTO filing fee on my behalf | Eddie | RED |\n"
+        "| 2 | Add memory throttle module | planning | HIGH |\n"
+    )
+    planner = TaskPlanner(backlog_path=backlog)
+    planner._issues_cache = []
+    tasks = planner.generate_tasks(
+        scores={"G5_ambitious": 0.1}, below_threshold=["G5_ambitious"],
+    )
+    titles = [t.title for t in tasks if t.source == "backlog"]
+    assert not any("uspto" in t.lower() or "filing fee" in t.lower() for t in titles), \
+        f"RED-priority task leaked into dispatch: {titles}"
+    assert any("memory throttle" in t.lower() for t in titles), \
+        f"HIGH-priority task was wrongly filtered: {titles}"
+
+
 def test_missing_backlog_graceful(planner_no_backlog):
     """Missing backlog file doesn't crash, falls back to generic task."""
     with patch.object(planner_no_backlog, "_search_chat_history", return_value=[]):

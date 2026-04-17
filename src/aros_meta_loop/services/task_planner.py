@@ -229,6 +229,14 @@ class TaskPlanner:
             if not text or len(text) < 10 or "DONE" in priority:
                 continue
 
+            # Honor Nirmana quarantine markers: skip tasks explicitly flagged as
+            # not-auto-dispatchable (RED zone, Eddie-only, or inline DO_NOT_AUTO_DISPATCH).
+            # This prevents re-dispatch churn on one-way-door tasks like legal filings.
+            if "DO_NOT_AUTO_DISPATCH" in text:
+                continue
+            if priority in ("RED", "EDDIE-ONLY", "EDDIE"):
+                continue
+
             # Detect project from task text
             project = "~/Projects/aros-kernel"
             tl = text.lower()
