@@ -194,6 +194,54 @@ def test_quarantine_red_priority_skipped(tmp_path):
         f"HIGH-priority task was wrongly filtered: {titles}"
 
 
+def test_completed_items_skipped(tmp_path):
+    """Completed backlog items must not be re-dispatched.
+
+    Regression for MetaLoop #344: a backlog cell carrying Nirmana's status
+    annotation ("... thermal MVP DONE ...") was re-emitted verbatim as a
+    task. Both strikethrough (~~...~~) and an explicit DONE token mark an
+    item as finished — in the task cell or the priority cell.
+    """
+    backlog = tmp_path / "night-runner-projects.md"
+    backlog.write_text(
+        "# Night Runner Projects\n\n"
+        "## Task Backlog\n"
+        "| # | Task | Source | Priority |\n"
+        "|---|------|--------|----------|\n"
+        "| 1 | ~~Build distributable binary~~ **DONE** — shipped in abc123 | Eddie | ~~MEDIUM~~ DONE |\n"
+        "| 2 | Implement hardware awareness — thermal MVP DONE (MetaLoop #343, commit 23bdab3) | Eddie | HIGH (partial) |\n"
+        "| 3 | Implement event bus for aros-kernel | planning | MEDIUM |\n"
+    )
+    planner = TaskPlanner(backlog_path=backlog)
+    planner._issues_cache = []
+    tasks = planner.generate_tasks(
+        scores={"G5_ambitious": 0.1}, below_threshold=["G5_ambitious"],
+    )
+    titles = [t.title for t in tasks if t.source == "backlog"]
+    # Strikethrough item skipped
+    assert not any("distributable binary" in t.lower() for t in titles), \
+        f"Strikethrough item leaked into dispatch: {titles}"
+    # Annotated "DONE" item skipped even though its priority cell is not DONE
+    assert not any("thermal" in t.lower() for t in titles), \
+        f"DONE-annotated item leaked into dispatch: {titles}"
+    # Genuinely-open item still comes through
+    assert any("event bus" in t.lower() for t in titles), \
+        f"Open task was wrongly filtered: {titles}"
+
+
+def test_repo_to_project_paths_resolve(tmp_path):
+    """REPO_TO_PROJECT must not point at stale/nonexistent local paths.
+
+    Regression for MetaLoop #344: a stale '~/Projects/aros-meta-loop' path
+    (actual checkout is 'aros-meta-loop-python') caused tasks to be
+    dispatched at a directory that does not exist.
+    """
+    from aros_meta_loop.services.task_planner import REPO_TO_PROJECT
+    assert "~/Projects/aros-meta-loop" not in REPO_TO_PROJECT.values(), \
+        "Stale aros-meta-loop path — should be aros-meta-loop-python"
+    assert REPO_TO_PROJECT["AROS-Lab/aros-meta-loop"] == "~/Projects/aros-meta-loop-python"
+
+
 def test_missing_backlog_graceful(planner_no_backlog):
     """Missing backlog file doesn't crash, falls back to generic task."""
     with patch.object(planner_no_backlog, "_search_chat_history", return_value=[]):

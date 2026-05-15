@@ -25,10 +25,12 @@ GITHUB_REPOS = [
     "spacelobster88/centurion",
 ]
 
-# Project path mapping
+# Project path mapping. NOTE: the meta-loop repo lives on disk as
+# aros-meta-loop-python — keep these paths in sync with the actual checkout
+# or dispatched tasks will point at a nonexistent directory.
 REPO_TO_PROJECT = {
     "AROS-Lab/aros-kernel": "~/Projects/aros-kernel",
-    "AROS-Lab/aros-meta-loop": "~/Projects/aros-meta-loop",
+    "AROS-Lab/aros-meta-loop": "~/Projects/aros-meta-loop-python",
     "spacelobster88/mini-claude-bot": "~/Projects/mini-claude-bot",
     "spacelobster88/telegram-claude-hero": "~/Projects/telegram-claude-hero",
     "spacelobster88/centurion": "~/Projects/centurion",
@@ -222,11 +224,23 @@ class TaskPlanner:
             elif line.startswith("- ") or re.match(r"^\d+\.", line):
                 text = re.sub(r"^[-\d.]+\s*", "", line).strip()
 
+            # Detect completion/supersession markers BEFORE the markdown
+            # cleanup strips them. Strikethrough (~~...~~) is the backlog's
+            # visual "done" convention; an explicit DONE token in either the
+            # task cell or the priority cell means the item is finished. This
+            # stops the parser from re-emitting Nirmana's status annotations
+            # (commit hashes, "thermal MVP DONE", etc.) as fresh work orders.
+            is_completed = (
+                "~~" in text
+                or "DONE" in priority
+                or re.search(r"\bDONE\b", text) is not None
+            )
+
             # Clean up
             text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
             text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
 
-            if not text or len(text) < 10 or "DONE" in priority:
+            if not text or len(text) < 10 or is_completed:
                 continue
 
             # Honor Nirmana quarantine markers: skip tasks explicitly flagged as
@@ -247,7 +261,7 @@ class TaskPlanner:
             elif "telegram" in tl:
                 project = "~/Projects/telegram-claude-hero"
             elif "meta-loop" in tl or "metaloop" in tl:
-                project = "~/Projects/aros-meta-loop"
+                project = "~/Projects/aros-meta-loop-python"
             elif "nirmana" in tl or "/away" in tl or "/back" in tl:
                 project = "~/Projects/mini-claude-bot"
 
@@ -365,7 +379,7 @@ class TaskPlanner:
             elif "centurion" in content.lower():
                 project = "~/Projects/centurion"
             elif "meta-loop" in content.lower() or "metaloop" in content.lower():
-                project = "~/Projects/aros-meta-loop"
+                project = "~/Projects/aros-meta-loop-python"
 
             tasks.append(PlannedTask(
                 title=title,
@@ -491,7 +505,7 @@ class TaskPlanner:
         return [PlannedTask(
             title="Improve error reporting accuracy",
             description="Review error messages and logging in aros-meta-loop for accuracy and clarity",
-            target_project="~/Projects/aros-meta-loop",
+            target_project="~/Projects/aros-meta-loop-python",
             authority_level=AuthorityLevel.GREEN,
             estimated_minutes=15,
             goal_source="G1_truthful",
@@ -513,7 +527,7 @@ class TaskPlanner:
         return [PlannedTask(
             title="Improve self-model calibration",
             description="Review self-model.toml accuracy against actual performance data",
-            target_project="~/Projects/aros-meta-loop",
+            target_project="~/Projects/aros-meta-loop-python",
             authority_level=AuthorityLevel.GREEN,
             estimated_minutes=15,
             goal_source="G6_self_know",
